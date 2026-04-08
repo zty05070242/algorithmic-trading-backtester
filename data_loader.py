@@ -30,7 +30,7 @@ def load_historical_data(ticker:str, start_date:str, end_date:str, interval:str=
     return historical_data
 
 
-#test the loader
+#test the loader with main guard
 if __name__ == "__main__":
     data_loaded = load_historical_data("TSLA", "2010-01-01", "2026-04-01")
     print(data_loaded)
