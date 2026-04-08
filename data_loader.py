@@ -35,5 +35,3 @@ if __name__ == "__main__":
     data_loaded = load_historical_data("TSLA", "2010-01-01", "2026-04-01")
     print(data_loaded)
 
-
-
