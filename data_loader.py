@@ -22,9 +22,9 @@ def load_historical_data(ticker:str, start_date:str, end_date:str, interval:str=
     
     #sort the data
     historical_data = historical_data[["Open", "Close", "High", "Low", "Volume"]]
-    historical_data.copy() #make a copy first
+    historical_data = historical_data.copy() #make a copy first
     historical_data.columns = ["open", "close", "high", "low", "volume"]
-    historical_data.dropna().sort_index()
+    historical_data = historical_data.dropna().sort_index()
 
     print(f"Successfully loaded {len(historical_data)} bars for {ticker}")
     return historical_data
