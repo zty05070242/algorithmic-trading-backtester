@@ -37,6 +37,7 @@ def calculate_position_size(account_balance:float, entry_price:float, stop_loss_
         "Position Size": round(position_size, 2)
         }
 
+# test the code with main guard
 if __name__ == "__main__":
     position = calculate_position_size(10000, 100, 99, 0.02)
     for key, value in position.items():
