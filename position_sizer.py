@@ -23,24 +23,23 @@ def calculate_position_size(
     position_size = units_to_trade * entry_price
 
     # Safety: check values after calculation as well.
-    if risk_per_unit < 0.01:
-        raise ValueError("Entry and stop loss are too close")
     if position_size < min_position:
         raise ValueError(f"Calculated position size {position_size} is smaller than the minimim: {min_position}. Adjust your levels.")
 
-    direction = "LONG" if entry_price > stop_loss_price else "SHORT"
+    direction = "long" if entry_price > stop_loss_price else "short"
 
-    return{
-        "Account Balance": account_balance,
-        "Entry Price": entry_price,
-        "Stop Loss Price": stop_loss_price,
-        "Direction": direction,
-        "Risk %": risk_pct,
-        "Max Risk Allowed": round(max_risk, 2),
-        "Risk per Unit": risk_per_unit,
-        "Units to Trade": units_to_trade,
-        "Position Size": round(position_size, 2)
-        }
+    return {
+        # canonical keys for engine use
+        "account_balance": account_balance,
+        "entry_price": entry_price,
+        "stop_loss": stop_loss_price,
+        "direction": direction,
+        "risk_pct": risk_pct,
+        "max_risk_allowed": round(max_risk, 2),
+        "risk_per_unit": risk_per_unit,
+        "units_to_trade": units_to_trade,
+        "position_size": round(position_size, 2),
+    }
 
 # test the code using main guard
 if __name__ == "__main__":
