@@ -91,7 +91,12 @@ class Backtester:
                 entry_price = row['close']
                 direction = int(row['signal'])
 
-                # Stop loss: 2% away in the opposite direction
+#********************************Stop loss: 2% away in the opposite direction*******************************THIS STOP LOSS METHOD IS WRONG***********************************************************************************
+# stop loss shold take another module that analyses the data and tells where to put the stop loss.
+# to make it simple to begin with,  set the stop loss to be the bottom of the current candle (the lowest price of the day)
+# Simplest way of MA-cross strategy is buy after BUY signal, sell after SELL signal. But this is not ideal. 
+# Say we going long: after setting the stop loss, we need to check an important resistance level above it to set a TP level. This will require S/R analysis.
+# Or we can do this: after entry, after setting a stop-loss, calculate the rrr by spotting a resistance level above. If rrr >= 3, trade. if rrr < 3, don't trade
                 stop_loss = entry_price * (0.98 if direction == 1 else 1.02)
 
                 sizing = calculate_position_size(
@@ -101,7 +106,7 @@ class Backtester:
                     stop_loss_price=stop_loss
                 )
 
-                self.position = sizing['position_size']     # snake_case — matches updated position_sizer
+                self.position = sizing['position_size']
                 self.entry_price = entry_price
                 self.stop_loss = sizing['stop_loss']
                 self.entry_date = date
