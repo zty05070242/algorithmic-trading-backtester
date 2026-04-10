@@ -17,7 +17,7 @@ def load_historical_data(ticker:str, start_date:str, end_date:str, interval:str=
         raise ValueError("Unable to load data")
     # fix new yfinance behaviour: multi-index columns
     if isinstance(historical_data.columns, pd.MultiIndex):
-        # flatten the columns: remove the ticker level
+        # flatten the columns: remove the ticker level, just give me level 0
         historical_data.columns = historical_data.columns.get_level_values(0)
     
     #sort the data

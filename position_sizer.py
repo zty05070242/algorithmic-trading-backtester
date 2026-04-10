@@ -1,5 +1,11 @@
 
-def calculate_position_size(account_balance:float, entry_price:float, stop_loss_price:float, risk_pct:float, min_position:float=0.1) -> dict:
+def calculate_position_size(
+        account_balance:float, 
+        entry_price:float, 
+        stop_loss_price:float, 
+        risk_pct:float, 
+        min_position:float=0.1
+        ) -> dict:
    
     # Safety: validate any input before any calculation
     if account_balance <= 0:
@@ -23,7 +29,6 @@ def calculate_position_size(account_balance:float, entry_price:float, stop_loss_
         raise ValueError(f"Calculated position size {position_size} is smaller than the minimim: {min_position}. Adjust your levels.")
 
     direction = "LONG" if entry_price > stop_loss_price else "SHORT"
-
 
     return{
         "Account Balance": account_balance,
