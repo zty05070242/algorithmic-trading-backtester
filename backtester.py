@@ -186,7 +186,7 @@ class Backtester:
 
 if __name__ == "__main__":
     from data_loader import load_historical_data
-    from strategy import MovingAverageCrossover
+    from strategies.ma_crossover import MovingAverageCrossover
 
     df = load_historical_data("NVDA", "2000-01-01", "2026-04-09")
     strategy = MovingAverageCrossover(fast_period=10, slow_period=20)

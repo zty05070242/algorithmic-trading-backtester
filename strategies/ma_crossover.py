@@ -1,36 +1,5 @@
 import pandas as pd
-from abc import ABC, abstractmethod
-from data_loader import load_historical_data
-
-
-class Strategy(ABC):
-    """
-    Every strategy must be able to:
-    1. Have a name
-    2. Load data via set_data()
-    3. Generate their own signals via generate_signals()
-    4. Return the signals via get_signals()
-    """
-    def __init__(self, name: str = "default_name"):
-        self.name = name
-        self.data = None
-        self._signals_generated = False
-
-    def set_data(self, data: pd.DataFrame):
-        """Receives a pre-loaded OHLCV DataFrame and stores it in the strategy."""
-        self.data = data.copy()
-        self._signals_generated = False
-
-    @abstractmethod
-    def generate_signals(self) -> pd.DataFrame:
-        pass
-
-    def get_signals(self) -> pd.DataFrame:
-        if self.data is None:
-            raise ValueError("No data loaded. Call set_data() first.")
-        if not self._signals_generated:
-            raise ValueError("Signals not yet generated. Call generate_signals() first.")
-        return self.data
+from strategy_base_class import Strategy
 
 
 class MovingAverageCrossover(Strategy):
@@ -77,9 +46,12 @@ class MovingAverageCrossover(Strategy):
 
 
 if __name__ == "__main__":
+    import sys
+    sys.path.insert(0, "..")
+    from data_loader import load_historical_data
+
     df = load_historical_data("NVDA", "2000-01-01", "2026-04-09")
 
-    print("Testing strategy...")
     strategy = MovingAverageCrossover(fast_period=10, slow_period=20)
     strategy.set_data(df)
     signals = strategy.generate_signals()
