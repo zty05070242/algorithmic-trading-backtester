@@ -1,4 +1,4 @@
-from strategy import Strategy
+from strategy_folder._strategy_bass_class import Strategy
 from data_loader import load_historical_data
 import pandas as pd
 
