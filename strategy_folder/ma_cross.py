@@ -1,4 +1,8 @@
-from strategy_folder._strategy_bass_class import Strategy
+import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+from _strategy_bass_class import Strategy
 from data_loader import load_historical_data
 import pandas as pd
 
