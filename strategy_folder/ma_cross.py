@@ -2,7 +2,7 @@ import sys
 import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from _strategy_bass_class import Strategy
+from ._strategy_bass_class import Strategy
 from data_loader import load_historical_data
 import pandas as pd
 
@@ -60,5 +60,5 @@ if __name__ == "__main__":
 # 2. load_historical_data() in data_loader.py is called. So it returns the historical data.
 # 3. set_data() in the Strategy base class is called using the returned historical data. 
 #    It stores the data in self.data (this happens in the child class too, because it inherits its parent class's properties).
-# 4. When generate_signals() runs, it reads self.data, and uses self.data to generate signals. It returns the signals generated as df.
+# 4. When generate_signals() runs, it reads self.data, and uses self.data to generate signals. It returns the signals generated as df (the other df).
 # 5. The signals returned are printed out.

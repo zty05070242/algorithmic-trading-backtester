@@ -52,14 +52,24 @@ class Backtester:
 
         for date, row in df.iterrows():
 
-            # === EXIT: close position on opposite signal ===
+            # === EXIT: stop loss hit or opposite signal ===
             if self.trade_open:
+                sl_hit = (
+                    (self.current_direction == 1 and row['low'] <= self.stop_loss) or
+                    (self.current_direction == -1 and row['high'] >= self.stop_loss)
+                )
                 opposite_signal = (
                     (self.current_direction == 1 and row['signal'] == -1) or
                     (self.current_direction == -1 and row['signal'] == 1)
                 )
-                if opposite_signal:
+                if sl_hit:
+                    exit_price = self.stop_loss
+                elif opposite_signal:
                     exit_price = row['close']
+                else:
+                    exit_price = None
+
+                if exit_price is not None:
 
                     # Multiply by direction: long profits when price rises, short when it falls
                     pnl = (exit_price - self.entry_price) * self.position * self.current_direction
@@ -80,19 +90,25 @@ class Backtester:
 
                     if verbose:
                         direction_label = "LONG" if self.current_direction == 1 else "SHORT"
-                        print(f"CLOSED {direction_label} on {date.date()} | PnL: £{pnl:.2f} ({pnl_pct:.2f}%)")
+                        exit_reason = "SL HIT" if sl_hit else "SIGNAL"
+                        print(f"Balance: £{self.current_balance:,.2f} | CLOSED {direction_label} on {date.date()} | "
+                              f"{self.position:.4f} units @ £{exit_price:.2f} | PnL: £{pnl:.2f} ({pnl_pct:.2f}%) | {exit_reason}")
 
                     self.trade_open = False
                     self.position = 0.0
                     self.current_direction = 0
 
             # === ENTRY: open new position on signal ===
-            if not self.trade_open and row['signal'] != 0:
+            if not self.trade_open and row['signal'] != 0 and self.current_balance > 0:
                 entry_price = row['close']
                 direction = int(row['signal'])
 
-                # Stop loss: 2% away in the opposite direction
-                stop_loss = entry_price * (0.98 if direction == 1 else 1.02)
+                # Stop loss: low of entry candle for longs, high for shorts
+                stop_loss = row['low'] if direction == 1 else row['high']
+
+                # Skip trade if entry price equals stop loss — no room for a valid SL
+                if stop_loss == entry_price:
+                    continue
 
                 sizing = calculate_position_size(
                     account_balance=self.current_balance,
@@ -101,7 +117,8 @@ class Backtester:
                     stop_loss_price=stop_loss
                 )
 
-                self.position = sizing['position_size']     # snake_case — matches updated position_sizer
+                max_units = (self.current_balance * 20) / entry_price  # 20x max leverage
+                self.position = min(sizing['units_to_trade'], max_units)
                 self.entry_price = entry_price
                 self.stop_loss = sizing['stop_loss']
                 self.entry_date = date
@@ -110,7 +127,7 @@ class Backtester:
 
                 if verbose:
                     direction_label = sizing['direction'].upper()
-                    print(f"OPENED {direction_label} on {date.date()} | "
+                    print(f"Balance: £{self.current_balance:,.2f} | OPENED {direction_label} on {date.date()} | "
                           f"{self.position:.4f} units @ £{entry_price:.2f} | SL: £{stop_loss:.2f}")
 
             # === Record equity AFTER processing this bar ===
@@ -183,7 +200,37 @@ if __name__ == "__main__":
     from data_loader import load_historical_data
     from strategy_folder.ma_cross import MovingAverageCrossover
 
-    df = load_historical_data("NVDA", "2000-01-01", "2026-04-09")
+    df = load_historical_data("^GSPC", "2000-01-01", "2026-04-09")
     strategy = MovingAverageCrossover(fast_period=10, slow_period=20)
-    backtester = Backtester(initial_balance=6000, risk_pct=0.02)
+    backtester = Backtester(initial_balance=10000, risk_pct=0.02)
     results = backtester.run(df, strategy, verbose=True)
+
+    # --- Interactive Chart ---
+    import plotly.graph_objects as go
+
+    signals = strategy.get_signals()
+    buy_signals  = signals[signals['signal'] == 1]
+    sell_signals = signals[signals['signal'] == -1]
+
+    fig = go.Figure()
+
+    fig.add_trace(go.Scatter(x=signals.index, y=signals['close'],
+                             name='Close', line=dict(color='black', width=1)))
+    fig.add_trace(go.Scatter(x=signals.index, y=signals['fast_ma'],
+                             name=f'Fast MA ({strategy.fast_period})', line=dict(color='blue', width=1)))
+    fig.add_trace(go.Scatter(x=signals.index, y=signals['slow_ma'],
+                             name=f'Slow MA ({strategy.slow_period})', line=dict(color='orange', width=1)))
+    fig.add_trace(go.Scatter(x=buy_signals.index, y=buy_signals['close'],
+                             name='Buy', mode='markers',
+                             marker=dict(symbol='triangle-up', size=8, color='green')))
+    fig.add_trace(go.Scatter(x=sell_signals.index, y=sell_signals['close'],
+                             name='Sell', mode='markers',
+                             marker=dict(symbol='triangle-down', size=8, color='red')))
+
+    fig.update_layout(title=f'MA Crossover Signals — {strategy.name}',
+                      xaxis_title='Date', yaxis_title='Price',
+                      hovermode='x unified')
+
+    fig.write_html('signals_chart.html')
+    print("Chart saved to signals_chart.html — open it in your browser")
+    fig.show()
