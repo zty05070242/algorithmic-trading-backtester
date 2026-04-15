@@ -11,9 +11,11 @@ class Backtester:
     Position sizing via position_sizer().
     """
 
-    def __init__(self, initial_balance: float = 6000.0, risk_pct: float = 0.02):
+    def __init__(self, initial_balance: float = 6000.0, risk_pct: float = 0.02,
+                 slippage_pct: float = 0.0):
         self.initial_balance = initial_balance
         self.risk_pct = risk_pct
+        self.slippage_pct = slippage_pct    # combined spread + slippage cost per fill
         self._reset()                       # Use a reset method so run() can call it cleanly
 
     def _reset(self):
@@ -48,7 +50,15 @@ class Backtester:
         if verbose:
             print(f"Strategy       : {strategy.name}")
             print(f"Initial balance: £{self.initial_balance:,.2f}")
-            print(f"Risk per trade : {self.risk_pct * 100:.1f}%\n")
+            print(f"Risk per trade : {self.risk_pct * 100:.1f}%")
+            print(f"Slippage       : {self.slippage_pct * 100:.3f}%\n")
+
+        # pending_signal holds the signal from the previous bar,
+        # so we enter on the NEXT bar's open instead of the signal bar's close.
+        # This removes look-ahead bias: you see the close, decide to trade,
+        # and the earliest you can realistically execute is the next bar's open.
+        pending_signal = 0
+        pending_sl = 0.0                    # signal bar's low (long) or high (short)
 
         for date, row in df.iterrows():
 
@@ -63,9 +73,19 @@ class Backtester:
                     (self.current_direction == -1 and row['signal'] == 1)
                 )
                 if sl_hit:
-                    exit_price = self.stop_loss
+                    # Apply slippage: SL fill is worse than the SL level
+                    if self.current_direction == 1:
+                        exit_price = self.stop_loss * (1 - self.slippage_pct)  # long SL slips lower
+                    else:
+                        exit_price = self.stop_loss * (1 + self.slippage_pct)  # short SL slips higher
                 elif opposite_signal:
-                    exit_price = row['close']
+                    # Exit at next bar's open would add complexity; for exits we use
+                    # the close with slippage as a reasonable approximation — you see
+                    # the signal forming and can place a market-on-close order.
+                    if self.current_direction == 1:
+                        exit_price = row['close'] * (1 - self.slippage_pct)  # selling: slips lower
+                    else:
+                        exit_price = row['close'] * (1 + self.slippage_pct)  # covering short: slips higher
                 else:
                     exit_price = None
 
@@ -82,7 +102,7 @@ class Backtester:
                         'exit_date': date,
                         'direction': "long" if self.current_direction == 1 else "short",
                         'entry_price': self.entry_price,
-                        'exit_price': exit_price,
+                        'exit_price': round(exit_price, 2),
                         'position_size': self.position,
                         'pnl': round(pnl, 2),
                         'pnl_pct': round(pnl_pct, 2)
@@ -98,16 +118,24 @@ class Backtester:
                     self.position = 0.0
                     self.current_direction = 0
 
-            # === ENTRY: open new position on signal ===
-            if not self.trade_open and row['signal'] != 0 and self.current_balance > 0:
-                entry_price = row['close']
-                direction = int(row['signal'])
+            # === ENTRY: execute pending signal from previous bar at today's open ===
+            if not self.trade_open and pending_signal != 0 and self.current_balance > 0:
+                direction = pending_signal
 
-                # Stop loss: low of entry candle for longs, high for shorts
-                stop_loss = row['low'] if direction == 1 else row['high']
+                # Entry at this bar's open, with slippage making the fill worse
+                if direction == 1:
+                    entry_price = row['open'] * (1 + self.slippage_pct)   # buying: slips higher
+                else:
+                    entry_price = row['open'] * (1 - self.slippage_pct)   # shorting: slips lower
+
+                # Stop loss: from the SIGNAL bar (t), not the entry bar (t+1)
+                # We already know this level when we decide to trade
+                stop_loss = pending_sl
 
                 # Skip trade if entry price equals stop loss — no room for a valid SL
                 if stop_loss == entry_price:
+                    pending_signal = 0
+                    self.equity_curve.append({'date': date, 'balance': self.current_balance})
                     continue
 
                 sizing = calculate_position_size(
@@ -129,6 +157,14 @@ class Backtester:
                     direction_label = sizing['direction'].upper()
                     print(f"Balance: £{self.current_balance:,.2f} | OPENED {direction_label} on {date.date()} | "
                           f"{self.position:.4f} units @ £{entry_price:.2f} | SL: £{stop_loss:.2f}")
+
+            # Capture this bar's signal and SL level for execution on the NEXT bar
+            pending_signal = int(row['signal'])
+            # SL = this bar's low for longs, high for shorts (known at close)
+            if pending_signal == 1:
+                pending_sl = row['low']
+            elif pending_signal == -1:
+                pending_sl = row['high']
 
             # === Record equity AFTER processing this bar ===
             self.equity_curve.append({
@@ -202,35 +238,9 @@ if __name__ == "__main__":
 
     df = load_historical_data("^GSPC", "2000-01-01", "2026-04-09")
     strategy = MovingAverageCrossover(fast_period=10, slow_period=20)
-    backtester = Backtester(initial_balance=10000, risk_pct=0.02)
+    backtester = Backtester(initial_balance=10000, risk_pct=0.02, slippage_pct=0.0001)
     results = backtester.run(df, strategy, verbose=True)
 
     # --- Interactive Chart ---
-    import plotly.graph_objects as go
-
-    signals = strategy.get_signals()
-    buy_signals  = signals[signals['signal'] == 1]
-    sell_signals = signals[signals['signal'] == -1]
-
-    fig = go.Figure()
-
-    fig.add_trace(go.Scatter(x=signals.index, y=signals['close'],
-                             name='Close', line=dict(color='black', width=1)))
-    fig.add_trace(go.Scatter(x=signals.index, y=signals['fast_ma'],
-                             name=f'Fast MA ({strategy.fast_period})', line=dict(color='blue', width=1)))
-    fig.add_trace(go.Scatter(x=signals.index, y=signals['slow_ma'],
-                             name=f'Slow MA ({strategy.slow_period})', line=dict(color='orange', width=1)))
-    fig.add_trace(go.Scatter(x=buy_signals.index, y=buy_signals['close'],
-                             name='Buy', mode='markers',
-                             marker=dict(symbol='triangle-up', size=8, color='green')))
-    fig.add_trace(go.Scatter(x=sell_signals.index, y=sell_signals['close'],
-                             name='Sell', mode='markers',
-                             marker=dict(symbol='triangle-down', size=8, color='red')))
-
-    fig.update_layout(title=f'MA Crossover Signals — {strategy.name}',
-                      xaxis_title='Date', yaxis_title='Price',
-                      hovermode='x unified')
-
-    fig.write_html('signals_chart.html')
-    print("Chart saved to signals_chart.html — open it in your browser")
-    fig.show()
+    from chart import plot_signals
+    plot_signals(strategy)
