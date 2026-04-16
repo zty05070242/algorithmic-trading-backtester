@@ -191,6 +191,12 @@ class Backtester:
             print(f"Win rate       : {metrics['win_rate_pct']:.1f}%")
             print(f"Sharpe ratio   : {metrics['sharpe_ratio']:.2f}")
             print(f"Max drawdown   : {metrics['max_drawdown_pct']:.2f}%")
+            print(f"Profit factor  : {metrics['profit_factor']}")
+            print(f"Expectancy     : £{metrics['expectancy']:,.2f} per trade")
+            print(f"Avg win        : £{metrics['avg_win']:,.2f}")
+            print(f"Avg loss       : £{metrics['avg_loss']:,.2f}")
+            print(f"Largest win    : £{metrics['largest_win']:,.2f}")
+            print(f"Largest loss   : £{metrics['largest_loss']:,.2f}")
 
         return metrics
 
@@ -220,6 +226,23 @@ class Backtester:
         drawdown = (equity_df['balance'] - rolling_max) / rolling_max
         max_drawdown_pct = drawdown.min() * 100             # most negative value = worst drawdown
 
+        # Profit factor: gross profit / gross loss
+        gross_profit = sum(t['pnl'] for t in self.trades if t['pnl'] > 0)
+        gross_loss   = abs(sum(t['pnl'] for t in self.trades if t['pnl'] < 0))
+        profit_factor = round(gross_profit / gross_loss, 2) if gross_loss > 0 else float('inf')
+
+        # Average win and average loss
+        losing_trades = [t for t in self.trades if t['pnl'] < 0]
+        avg_win  = round(gross_profit / len(winning_trades), 2) if winning_trades else 0
+        avg_loss = round(gross_loss   / len(losing_trades),  2) if losing_trades  else 0
+
+        # Expectancy: average PnL per trade
+        expectancy = round(sum(t['pnl'] for t in self.trades) / num_trades, 2) if num_trades > 0 else 0
+
+        # Largest win and largest loss
+        largest_win  = round(max((t['pnl'] for t in self.trades), default=0), 2)
+        largest_loss = round(min((t['pnl'] for t in self.trades), default=0), 2)
+
         return {
             'final_balance': self.current_balance,
             'total_return_pct': total_return_pct,
@@ -227,6 +250,12 @@ class Backtester:
             'win_rate_pct': round(win_rate * 100, 1),
             'sharpe_ratio': round(sharpe, 2),
             'max_drawdown_pct': round(max_drawdown_pct, 2),
+            'profit_factor': profit_factor,
+            'avg_win': avg_win,
+            'avg_loss': avg_loss,
+            'expectancy': expectancy,
+            'largest_win': largest_win,
+            'largest_loss': largest_loss,
             'trades': self.trades,
             'equity_curve': self.equity_curve
         }
@@ -234,10 +263,10 @@ class Backtester:
 
 if __name__ == "__main__":
     from data_loader import load_historical_data
-    from strategy_folder.ma_cross import MovingAverageCrossover
+    from strategy_folder.two_b import TwoB
 
-    df = load_historical_data("^GSPC", "2000-01-01", "2026-04-09")
-    strategy = MovingAverageCrossover(fast_period=10, slow_period=20)
+    df = load_historical_data("ZW=F", "2010-01-01", "2026-04-15")
+    strategy = TwoB(lookback=20, confirmation_days=3)
     backtester = Backtester(initial_balance=10000, risk_pct=0.02, slippage_pct=0.0001)
     results = backtester.run(df, strategy, verbose=True)
 
