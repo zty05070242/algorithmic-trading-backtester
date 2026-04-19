@@ -262,11 +262,13 @@ class Backtester:
 
 
 if __name__ == "__main__":
-    from data_loader import load_historical_data
-    from strategy_folder.two_b import TwoB
+    from data_loader import load_historical_data    
+    from strategy_folder.kalman_cross import KalmanCrossover
+    from strategy_folder.ma_cross import MovingAverageCrossover
+    from strategy_folder.kalman_ma_hybrid import KalmanMAHybrid
 
-    df = load_historical_data("ZW=F", "2010-01-01", "2026-04-15")
-    strategy = TwoB(lookback=20, confirmation_days=3)
+    df = load_historical_data("^GSPC", "2000-01-01", "2026-04-15")
+    strategy = KalmanMAHybrid(fast_cov=0.01, slow_period=20)
     backtester = Backtester(initial_balance=10000, risk_pct=0.02, slippage_pct=0.0001)
     results = backtester.run(df, strategy, verbose=True)
 
