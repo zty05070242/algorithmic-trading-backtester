@@ -48,10 +48,18 @@ def _universal_threshold(n: int, sigma: float) -> float:
     return sigma * np.sqrt(2.0 * np.log(n))
 
 
-def _denoise_array(x: np.ndarray, wavelet: str, level, mode: str) -> np.ndarray:
+def _denoise_array(x: np.ndarray, wavelet: str, level, mode: str,
+                   threshold_scale: float = 1.0) -> np.ndarray:
     """
     Core denoising on a raw numpy array. Used by both the global and the
     rolling wrappers so the thresholding logic lives in one place.
+
+    threshold_scale multiplies the universal threshold before applying it.
+    1.0 = original Donoho-Johnstone behaviour (aggressive — designed for
+    worst-case noise recovery in stationary signals like returns).
+    0.5 is a good starting point when denoising price directly, preserving
+    more medium-frequency structure (weekly/monthly swings) while still
+    suppressing the finest-scale noise.
     """
     # pywt.dwt_max_level tells us the deepest decomposition this length supports
     # for this wavelet. If the caller didn't pick a level, use the maximum.
@@ -73,7 +81,8 @@ def _denoise_array(x: np.ndarray, wavelet: str, level, mode: str) -> np.ndarray:
     # Noise sigma is estimated from the FINEST detail band (cD_1, last in list).
     # Finest detail is where noise dominates signal.
     sigma = _estimate_sigma(coeffs[-1])
-    threshold = _universal_threshold(len(x), sigma)
+    # threshold_scale lets callers dial down the aggressiveness; see docstring.
+    threshold = _universal_threshold(len(x), sigma) * threshold_scale
 
     # Threshold every detail band; leave the coarse approximation untouched
     # (that's the low-frequency trend we want to keep).
@@ -92,6 +101,7 @@ def wavelet_denoise(
     wavelet: str = "db6",
     level=None,
     mode: str = "soft",
+    threshold_scale: float = 1.0,
 ) -> pd.Series:
     """
     Global wavelet denoising — ONE-SHOT over the full series.
@@ -107,6 +117,9 @@ def wavelet_denoise(
                  smooth enough for financial data, compact support.
         level: decomposition depth; None means "use the max the data length allows".
         mode: 'soft' (shrink toward zero) or 'hard' (keep-or-kill).
+        threshold_scale: multiplier on the universal threshold. 1.0 = standard
+                         Donoho-Johnstone. 0.5 = less aggressive, better for
+                         denoising price directly.
 
     Returns:
         pd.Series with the same index as the input, holding the denoised signal.
@@ -122,7 +135,8 @@ def wavelet_denoise(
     if len(clean_series) < 2:
         return series.copy()
 
-    cleaned_vals = _denoise_array(clean_series.values, wavelet, level, mode)
+    cleaned_vals = _denoise_array(clean_series.values, wavelet, level, mode,
+                                  threshold_scale)
     return pd.Series(cleaned_vals, index=clean_series.index, name=series.name)
 
 
@@ -131,6 +145,7 @@ def rolling_wavelet_denoise(
     window: int = 252,
     wavelet: str = "db6",
     mode: str = "soft",
+    threshold_scale: float = 1.0,
 ) -> pd.Series:
     """
     Causal rolling-window wavelet denoising — LIVE-TRADEABLE version.
@@ -148,6 +163,9 @@ def rolling_wavelet_denoise(
         window: lookback size in bars. 252 ~ 1 year of daily bars.
         wavelet: pywt wavelet name.
         mode: 'soft' or 'hard' thresholding.
+        threshold_scale: multiplier on the universal threshold. 1.0 = standard
+                         Donoho-Johnstone. 0.5 = less aggressive, better for
+                         denoising price directly.
 
     Returns:
         pd.Series on the input's index. The first `window - 1` values are NaN
@@ -173,7 +191,7 @@ def rolling_wavelet_denoise(
     # keep only the last reconstructed sample.
     for t in range(window - 1, n):
         window_slice = values[t - window + 1 : t + 1]
-        denoised = _denoise_array(window_slice, wavelet, level, mode)
+        denoised = _denoise_array(window_slice, wavelet, level, mode, threshold_scale)
         out[t] = denoised[-1]
 
     return pd.Series(out, index=clean_series.index, name=series.name)

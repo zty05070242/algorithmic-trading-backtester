@@ -11,20 +11,27 @@ from data_loader import load_historical_data
 from wavelet_denoiser import wavelet_denoise, rolling_wavelet_denoise
 from pykalman import KalmanFilter
 import pandas as pd
+import numpy as np
 
 
 class WaveletKalmanCrossover(Strategy):
     """
     Kalman crossover on wavelet-denoised close prices.
 
-    Same denoise-returns-then-recompound trick as WaveletMACrossover, but the
-    two crossover lines are Kalman filters (fast and slow) on the cleaned close,
-    not moving averages.
+    Pipeline:
+      1. Denoise the raw close price directly inside each rolling window,
+         producing a smooth local price track (wavelet_close).
+      2. Run two Kalman filters (fast and slow) on wavelet_close — not on
+         raw close — and cross them like a standard Kalman crossover.
 
-    Reason to stack wavelet + Kalman: the wavelet step removes bursty, broadband
-    high-frequency noise in the return series, and the Kalman filter then
-    adaptively tracks the remaining trend. Think of it as a high-SNR front-end
-    feeding a tracker — analogous to denoising audio before pitch-tracking.
+    Stacking motivation (DSP analogy): the wavelet step is a broadband
+    denoising front-end that removes intraday/tick noise embedded in daily
+    bars. The Kalman filter then adaptively tracks the remaining trend.
+    Think: LP-filter the signal before feeding it to a tracker.
+
+    threshold_scale dials the wavelet aggressiveness:
+      1.0 = universal threshold (strong suppression)
+      0.5 = gentler, recommended for price series (default)
     """
 
     def __init__(
@@ -34,6 +41,7 @@ class WaveletKalmanCrossover(Strategy):
         wavelet: str = "db6",
         mode: str = "rolling",
         rolling_window: int = 252,
+        threshold_scale: float = 0.5,
     ):
         if fast_cov <= slow_cov:
             raise ValueError(
@@ -51,6 +59,7 @@ class WaveletKalmanCrossover(Strategy):
         self.wavelet = wavelet
         self.mode = mode
         self.rolling_window = rolling_window
+        self.threshold_scale = threshold_scale
 
     def _kalman_smooth(self, series: pd.Series, transition_covariance: float) -> pd.Series:
         """Causal 1D Kalman filter — no look-ahead (uses .filter(), not .smooth())."""
@@ -71,44 +80,28 @@ class WaveletKalmanCrossover(Strategy):
 
         df = self.data.copy()
 
-        # --- Step 1: returns ---
-        # We denoise returns (stationary) rather than price (non-stationary).
-        returns = df['close'].pct_change()
-        returns_clean_input = returns.dropna()
-
-        # --- Step 2: denoise returns ---
+        # --- Step 1: denoise close price directly ---
         if self.mode == "rolling":
-            denoised_returns = rolling_wavelet_denoise(
-                returns_clean_input,
+            wavelet_close = rolling_wavelet_denoise(
+                df['close'],
                 window=self.rolling_window,
                 wavelet=self.wavelet,
                 mode="soft",
+                threshold_scale=self.threshold_scale,
             )
         else:
-            denoised_returns = wavelet_denoise(
-                returns_clean_input,
+            # Global: uses future data — offline comparison only.
+            wavelet_close = wavelet_denoise(
+                df['close'],
                 wavelet=self.wavelet,
                 mode="soft",
+                threshold_scale=self.threshold_scale,
             )
 
-        denoised_returns = denoised_returns.reindex(df.index)
-
-        # --- Step 3: reconstruct cleaned close by cumulative compounding ---
-        first_valid = denoised_returns.first_valid_index()
-        if first_valid is None:
-            raise ValueError(
-                "Not enough data for wavelet denoising. "
-                f"Need at least {self.rolling_window} bars."
-            )
-
-        anchor_close = df.loc[first_valid, 'close']
-        cumulative = (1.0 + denoised_returns.loc[first_valid:].fillna(0.0)).cumprod()
-        cleaned_close = anchor_close * cumulative
-
-        df['wavelet_close'] = cleaned_close
+        df['wavelet_close'] = wavelet_close
         df = df.dropna(subset=['wavelet_close']).copy()
 
-        # --- Step 4: Kalman crossover on cleaned close ---
+        # --- Step 2: Kalman crossover on denoised close ---
         df['kalman_fast'] = self._kalman_smooth(df['wavelet_close'], self.fast_cov)
         df['kalman_slow'] = self._kalman_smooth(df['wavelet_close'], self.slow_cov)
         df['signal'] = 0.0
@@ -126,6 +119,20 @@ class WaveletKalmanCrossover(Strategy):
         ] = -1
 
         df = df.dropna()
+
+        # --- Step 3: wavelet-derived stop loss ---
+        # noise = what the wavelet removed. Its rolling std is the noise sigma
+        # in price units — consistent with the denoiser's own sigma estimate.
+        noise = df['close'] - df['wavelet_close']
+        sigma_price = noise.rolling(window=self.rolling_window, min_periods=20).std()
+        threshold_price = sigma_price * np.sqrt(2.0 * np.log(self.rolling_window)) * self.threshold_scale
+
+        df['stop_loss'] = np.nan
+        df.loc[df['signal'] == 1,  'stop_loss'] = np.minimum(
+            df['wavelet_close'] - threshold_price, df['low'])
+        df.loc[df['signal'] == -1, 'stop_loss'] = np.maximum(
+            df['wavelet_close'] + threshold_price, df['high'])
+
         self.data = df
         self._signals_generated = True
 

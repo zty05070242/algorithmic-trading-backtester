@@ -1,156 +1,354 @@
-# Signal Extraction for Trend-Following Strategies: Kalman Filtering vs Wavelet Denoising
+# Algorithmic Trading Backtester
 
-A modular algorithmic trading backtester in Python, used as the testbed for a
-2×2 comparison of signal-extraction techniques applied to simple trend-following
-strategies on equity and commodity markets.
+A modular Python backtesting framework for daily-bar trend-following strategies,
+with a built-in experiment comparing Kalman filtering and wavelet denoising as
+signal pre-processing front-ends.
 
-## Motivation
+## Overview
 
-I'm a third-year BMus Tonmeister (audio engineering / DSP) student self-teaching
-quantitative finance. Price series and audio signals sit on opposite sides of an
-engineering desk but share the same problem: a latent signal of interest buried
-in additive noise, and the need to recover the signal *causally* — without
-peeking at future samples.
+The project has two layers:
 
-This repo transplants two standard DSP tools — **Kalman filtering** and
-**wavelet denoising** — into the generation step of a trend-following
-backtester, and asks whether either pre-processing step meaningfully improves
-a vanilla moving-average crossover baseline on daily S&P 500 and silver data.
+1. **The backtesting engine** — a reusable framework for loading data, sizing
+   positions, running strategies, and computing performance metrics.
+2. **The signal-extraction experiment** — a 2×2 comparison asking whether
+   applying Kalman filtering or wavelet denoising before a crossover strategy
+   improves performance on S&P 500 and silver futures.
 
-## Methodology
+The motivation comes from DSP: price series and audio signals share the same
+problem — a latent signal buried in additive noise that must be recovered
+*causally*, without peeking at future samples. This project transplants two
+standard DSP tools into the signal generation step of a trend-following
+backtester.
 
-Four strategy variants are benchmarked through the same backtester, on the
-same data, with the same risk sizing and slippage assumptions:
+---
 
-| # | Label            | Fast line              | Slow line                |
-|---|------------------|------------------------|--------------------------|
-| 1 | `MA/MA`          | SMA(20) of close       | SMA(50) of close         |
-| 2 | `Kalman/MA`      | Kalman filter of close | SMA(50) of close         |
-| 3 | `Wavelet+MA/MA`  | SMA(20) of cleaned close | SMA(50) of cleaned close |
-| 4 | `Wavelet+Kalman` | Fast Kalman of cleaned close | Slow Kalman of cleaned close |
+## Architecture
 
-**Wavelet pre-processing:** the cleaned close is produced by denoising *returns*
-(not price), then reconstructing a price path by cumulative compounding —
-`cleaned_close = close[0] * (1 + cleaned_returns).cumprod()`. Returns are
-approximately stationary, so the universal-threshold noise model used by the
-wavelet denoiser is well-posed on them; price itself is non-stationary.
+### Data pipeline
 
-**Denoising details:** `db6` wavelet, soft thresholding, universal threshold
-`sigma * sqrt(2 * log(n))` with `sigma` estimated from the finest detail band
-via median absolute deviation (the Donoho-Johnstone recipe). See
-[wavelet_denoiser.py](wavelet_denoiser.py).
+```
+yfinance  →  data_loader.py  →  DataFrame (OHLCV, DatetimeIndex)
+```
 
-**Trading assumptions:** £10,000 starting balance, 2% risk per trade, 0.0001
-(1 bp) slippage on each fill, entries on next bar's open, exits on same-bar
-close or stop-loss, 20× max leverage cap. Implemented in
-[backtester.py](backtester.py).
+[data_loader.py](data_loader.py) — wraps `yfinance.download()`. Flattens
+multi-index columns (yfinance ≥ 0.2 behaviour), renames to lowercase
+`open/close/high/low/volume`, drops NaNs.
 
-## Causal implementations
+```python
+df = load_historical_data("^GSPC", "2015-01-01", "2026-04-15")
+```
 
-Both smoothers use strictly past-and-current data at every step — same guarantee
-as `pykalman.KalmanFilter.filter()`, which is what the Kalman strategies use
-(not `.smooth()`, which looks both directions).
+### Strategy interface
 
-- **Kalman:** `KalmanFilter.filter()` in
-  [strategy_folder/kalman_ma_hybrid.py](strategy_folder/kalman_ma_hybrid.py),
-  [strategy_folder/kalman_cross.py](strategy_folder/kalman_cross.py),
-  [strategy_folder/wavelet_kalman_cross.py](strategy_folder/wavelet_kalman_cross.py).
-- **Wavelet:** `rolling_wavelet_denoise()` in
-  [wavelet_denoiser.py](wavelet_denoiser.py) — at each bar `t`, denoise the
-  prior `window` samples (default 252) and take only the last reconstructed
-  value. No future samples ever feed into the estimate at `t`.
+All strategies inherit from
+[strategy_folder/_strategy_bass_class.py](strategy_folder/_strategy_bass_class.py):
 
-For sanity-checking, the wavelet strategies also expose `mode='global'` which
-uses the full-series one-shot denoise (which *does* use future data). The
-comparison harness runs both modes and flags any case where the look-ahead
-version's Sharpe is materially higher — that would confirm the offline
-version was cheating.
+```python
+class Strategy(ABC):
+    def set_data(self, data: pd.DataFrame): ...
+    def generate_signals(self) -> pd.DataFrame: ...  # must return df with 'signal' column
+    def get_signals(self) -> pd.DataFrame: ...
+```
+
+`generate_signals()` must return the full DataFrame with at minimum a `signal`
+column (`1` = long, `-1` = short, `0` = flat). Strategies may also add a
+`stop_loss` column; if present, the backtester uses it instead of bar
+low/high.
+
+### Position sizing
+
+[position_sizer.py](position_sizer.py) — fixed fractional risk sizing:
+
+```
+units = (account_balance × risk_pct) / |entry_price − stop_loss|
+```
+
+Takes `account_balance`, `entry_price`, `stop_loss_price`, `risk_pct`.
+Returns a dict with `units_to_trade`, `position_size`, `direction`, and
+supporting fields.
+
+### Backtesting engines
+
+Two engines share the same strategy interface and metrics output:
+
+**[backtester.py](backtester.py) — `Backtester` (all-in / all-out)**
+
+- One position at a time: full risk on every signal.
+- Entry on the *next bar's open* after the signal bar (removes look-ahead bias).
+- Exit on stop-loss hit or opposite signal (at the signal bar's close).
+- Reads `stop_loss` column from strategy if present; falls back to bar
+  low/high.
+- 20× max leverage cap.
+
+**[backtester_scaled.py](backtester_scaled.py) — `BacktesterScaled` (tranche scaling)**
+
+- Up to `max_tranches` (default 3) independent positions per side.
+- Each signal opens one new tranche and closes the oldest opposite tranche
+  (FIFO scale-in / scale-out).
+- Each tranche has its own entry price and stop loss — allows pyramiding into
+  trends.
+- Risk per tranche = `risk_pct / max_tranches`, so total risk exposure stays
+  the same as the all-in engine.
+
+Both engines compute the same metrics: total return, Sharpe ratio, max
+drawdown, win rate, profit factor, expectancy, avg win/loss, largest win/loss.
+
+### Charting
+
+[chart.py](chart.py) — `plot_signals(strategy)` renders a Plotly candlestick
+chart with buy/sell markers and auto-detected indicator overlays (any column
+not in `{open, high, low, close, volume, signal}` is plotted as a line).
+Saves to HTML.
+
+---
+
+## Strategies
+
+| File | Class | Type | Description |
+|------|-------|------|-------------|
+| [ma_cross.py](strategy_folder/ma_cross.py) | `MovingAverageCrossover` | Trend | SMA(fast) / SMA(slow) crossover on raw close |
+| [kalman_cross.py](strategy_folder/kalman_cross.py) | `KalmanCrossover` | Trend | Dual Kalman crossover — fast and slow trackers on raw close |
+| [kalman_ma_hybrid.py](strategy_folder/kalman_ma_hybrid.py) | `KalmanMAHybrid` | Trend | Kalman fast line vs SMA slow line |
+| [wavelet_ma_cross.py](strategy_folder/wavelet_ma_cross.py) | `WaveletMACrossover` | Trend | SMA crossover on wavelet-denoised close |
+| [wavelet_kalman_cross.py](strategy_folder/wavelet_kalman_cross.py) | `WaveletKalmanCrossover` | Trend | Dual Kalman crossover on wavelet-denoised close |
+| [two_b.py](strategy_folder/two_b.py) | `TwoB` | Reversal | Sperandeo 2B Rule — failed breakout reversal |
+
+### 2B Rule (Sperandeo)
+
+Victor Sperandeo's failed-breakout reversal pattern:
+
+- **Short signal**: price breaks above the rolling swing high, then closes back
+  below it within `confirmation_days`. ATR and volume filters optional.
+- **Long signal**: price breaks below the rolling swing low, then closes back
+  above it within `confirmation_days`.
+
+Parameters: `lookback`, `confirmation_days`, `min_breakout_atr`, `volume_factor`.
+
+---
+
+## Signal-Extraction Experiment
+
+### Motivation
+
+Can wavelet denoising or Kalman filtering improve a standard crossover strategy
+when applied as a pre-processing step? And do they improve it for the *same*
+reason, or different reasons?
+
+### 2×2 grid
+
+| # | Label | Fast line | Slow line |
+|---|-------|-----------|-----------|
+| 1 | `MA/MA` | SMA(20) of close | SMA(50) of close |
+| 2 | `Kalman/MA` | Kalman(fast) of close | SMA(50) of close |
+| 3 | `Wavelet+MA/MA` | SMA(20) of denoised close | SMA(50) of denoised close |
+| 4 | `Wavelet+Kalman` | Kalman(fast) of denoised close | Kalman(slow) of denoised close |
+
+### Wavelet denoising details
+
+Implemented in [wavelet_denoiser.py](wavelet_denoiser.py).
+
+**Algorithm:** Donoho-Johnstone universal threshold.
+1. Discrete wavelet transform (DWT) decomposes the signal into a coarse
+   approximation + a pyramid of detail coefficient bands.
+2. Estimate noise `sigma` from the finest detail band via MAD:
+   `sigma = median(|cD1|) / 0.6745`
+3. Apply threshold `sigma * sqrt(2 * log(n)) * threshold_scale` to every
+   detail band (soft shrinkage).
+4. Inverse DWT reconstructs the cleaned signal.
+
+**Why price directly, not returns:** the original approach denoised returns and
+reconstructed price via `cumprod()`. The universal threshold (~2.8% at 252
+bars) zeros out almost every daily return, leaving a staircase that drifts
+upward in bull markets when compounded. Within a 252-bar rolling window the
+price series is approximately locally stationary, so the noise model is still
+valid, and denoising price directly avoids the drift artifact.
+
+**`threshold_scale=0.5`:** half the Donoho-Johnstone threshold. The full
+universal threshold is designed for worst-case noise recovery in stationary
+signals; `0.5` preserves medium-frequency structure (weekly/monthly swings)
+while still suppressing fine-scale noise.
+
+**Causal implementation:** `rolling_wavelet_denoise()` slides a 252-bar window
+and keeps only the last reconstructed value at each step — no future data ever
+feeds into the estimate at time `t`. This is the same causality guarantee as
+`pykalman.KalmanFilter.filter()` (vs `.smooth()`, which is non-causal).
+
+**Honesty check:** wavelet strategies also expose `mode='global'` (full-series
+one-shot, uses future data) for comparison. If the global Sharpe is materially
+higher than the rolling Sharpe, the offline version was cheating. The
+comparison harness flags any gap > 0.5 Sharpe.
+
+### Wavelet-derived stop loss
+
+Wavelet strategies set their stop-loss at the edge of the noise band rather
+than at the bar low/high:
+
+```
+threshold_price = sigma_price * sqrt(2 * log(window)) * threshold_scale
+long  SL = min(wavelet_close − threshold_price, bar_low)
+short SL = max(wavelet_close + threshold_price, bar_high)
+```
+
+The wider of the wavelet SL and the raw bar low/high is always taken — the SL
+is never *tighter* than what the bar range alone gives. The backtester reads
+the `stop_loss` column directly; non-wavelet strategies fall back to bar
+low/high.
+
+---
+
+## Key Findings
+
+Benchmarked on `^GSPC` (S&P 500), 2000–2026, £10,000 initial balance, 2%
+risk/trade, 1 bp slippage.
+
+### Finding 1 — Wavelet preprocessing is redundant before MA crossover
+
+| Metric | MA/MA (baseline) | Wavelet+MA/MA |
+|--------|:----------------:|:-------------:|
+| Total return | **+423%** | −34% |
+| Trades | 139 | 125 |
+| Win rate | 18% | 17.6% |
+| Avg win | **£4,758** | £724 |
+| Avg loss | £672 | £188 |
+
+**Root cause — the double low-pass problem.** A moving average and a wavelet
+denoiser are both low-pass filters operating on overlapping frequency bands.
+Stacking them makes the slow MA track the trend so tightly that any minor
+pullback causes the fast MA to cross back below it — generating premature exits.
+The baseline holds winners for an average of £4,758; the wavelet version exits
+the same trends for only £724. No stop-loss adjustment fixes this: it is the
+exit signal timing that breaks, not the risk management.
+
+### Finding 2 — Wavelet preprocessing is complementary before Kalman crossover
+
+| Metric | Kalman crossover | Wavelet+Kalman |
+|--------|:----------------:|:--------------:|
+| Total return | 312% | 168% |
+| Sharpe ratio | 0.19 | **0.26** |
+| Max drawdown | −64% | **−30%** |
+| Win rate | 8% | **16%** |
+| Avg win | £5,645 | £2,785 |
+| Avg loss | £151 | £304 |
+| Profit factor | 3.24 | 1.76 |
+| Trades | 100 | 87 |
+
+Wavelet preprocessing halves the maximum drawdown (−64% → −30%) and improves
+Sharpe by 37%, at the cost of roughly half the raw return. The wavelet removes
+broadband noise spikes that caused Kalman to fire false crossovers — hence
+higher win rate (8% → 16%) and fewer catastrophic losing runs. Raw return falls
+because the same smoothing causes slightly later entries and earlier exits.
+
+### Finding 3 — Why the combination matters
+
+The key difference is what the second stage does. A moving average is a
+fixed-frequency low-pass filter — it adds nothing the wavelet has not already
+done. A Kalman filter is an *adaptive* tracker: its effective bandwidth changes
+bar-by-bar based on a variance model and responds to curvature as well as
+level. The combination is partially non-redundant — wavelet handles broadband
+noise removal, Kalman handles adaptive trend tracking.
+
+**Summary:** wavelet denoising adds value as a front-end to an adaptive tracker
+(Kalman), not to a fixed smoother (MA). The improvement is in risk-adjusted
+terms (Sharpe, drawdown), not raw return.
+
+---
 
 ## Results
 
-Produced by `python run_comparison.py`. Tickers: `^GSPC` (S&P 500) and `SI=F`
-(silver futures), start 2015-01-01.
+Full multi-ticker results from `python run_comparison.py` (tickers: `^GSPC`,
+`SI=F`; start 2015-01-01). To be filled in after running.
 
 ### S&P 500 (^GSPC)
 
-| Strategy         | Sharpe | Max DD % | Total Return % | Trades | Win % | PF | Expectancy (£) |
-|------------------|-------:|---------:|---------------:|-------:|------:|---:|---------------:|
-| MA/MA            |  TBD   |   TBD    |      TBD       |  TBD   |  TBD  | TBD|      TBD       |
-| Kalman/MA        |  TBD   |   TBD    |      TBD       |  TBD   |  TBD  | TBD|      TBD       |
-| Wavelet+MA/MA    |  TBD   |   TBD    |      TBD       |  TBD   |  TBD  | TBD|      TBD       |
-| Wavelet+Kalman   |  TBD   |   TBD    |      TBD       |  TBD   |  TBD  | TBD|      TBD       |
+| Strategy | Sharpe | Max DD % | Total Return % | Trades | Win % | PF | Expectancy (£) |
+|----------|-------:|---------:|---------------:|-------:|------:|---:|---------------:|
+| MA/MA | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+| Kalman/MA | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+| Wavelet+MA/MA | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+| Wavelet+Kalman | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
 
 ### Silver Futures (SI=F)
 
-| Strategy         | Sharpe | Max DD % | Total Return % | Trades | Win % | PF | Expectancy (£) |
-|------------------|-------:|---------:|---------------:|-------:|------:|---:|---------------:|
-| MA/MA            |  TBD   |   TBD    |      TBD       |  TBD   |  TBD  | TBD|      TBD       |
-| Kalman/MA        |  TBD   |   TBD    |      TBD       |  TBD   |  TBD  | TBD|      TBD       |
-| Wavelet+MA/MA    |  TBD   |   TBD    |      TBD       |  TBD   |  TBD  | TBD|      TBD       |
-| Wavelet+Kalman   |  TBD   |   TBD    |      TBD       |  TBD   |  TBD  | TBD|      TBD       |
+| Strategy | Sharpe | Max DD % | Total Return % | Trades | Win % | PF | Expectancy (£) |
+|----------|-------:|---------:|---------------:|-------:|------:|---:|---------------:|
+| MA/MA | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+| Kalman/MA | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+| Wavelet+MA/MA | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+| Wavelet+Kalman | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
 
 ### Honesty check (rolling vs global wavelet Sharpe)
 
 Fill in after running. The closer these are, the less the global version was
 flattering itself with future data.
 
-## Limitations
+---
 
-- **Wavelet rolling-window cost.** `rolling_wavelet_denoise()` is O(window × N)
-  — for a 252-bar window this runs in seconds on a decade of daily data, but
-  an intraday version would need a faster implementation (or a different
-  transform, e.g. SWT).
-- **Single parameter set per method.** Every variant is run with one hand-picked
-  configuration — `MA(20/50)`, Kalman `fast_cov=0.01`, `db6` wavelet with
-  universal-threshold soft shrinkage. No grid search, no walk-forward
-  optimisation. Results are an existence proof, not a calibrated production
-  strategy.
-- **Transaction costs.** Only per-fill slippage (1 bp each side) is modelled.
-  No commissions, no borrow costs for shorts, no exchange fees, no overnight
-  financing.
-- **Single-asset backtests.** Each strategy trades one ticker at a time, with
-  all-in / all-out sizing. No portfolio effects, no correlation-aware sizing.
-- **Data source.** `yfinance` daily adjusted closes. Fine for a portfolio-piece
-  backtest, not the quality you'd run a real strategy on.
+## How to run
+
+```bash
+pip install yfinance pandas numpy plotly pykalman PyWavelets
+
+# Run the full 4-strategy comparison (saves CSV + equity HTML per ticker)
+python run_comparison.py
+
+# Run a single strategy interactively
+python backtester.py
+
+# Visualise wavelet denoising on returns
+python wavelet_denoiser.py
+
+# Plot signals for any strategy
+python strategy_folder/wavelet_kalman_cross.py
+```
+
+---
 
 ## Repo layout
 
 ```
-data_loader.py                      yfinance -> OHLCV DataFrame
-position_sizer.py                   risk-based unit sizing
-backtester.py                       basic (all-in/all-out) engine
-backtester_scaled.py                tranche-based scaling variant (not used here)
-chart.py                            plotly candle chart with auto-overlay
-wavelet_denoiser.py                 pywt denoising utilities (global + rolling-causal)
-compare_smoothers.py                visual smoother comparison
-run_comparison.py                   main deliverable — runs the 2x2 grid
+data_loader.py              yfinance → OHLCV DataFrame
+position_sizer.py           fixed-fractional risk sizing
+backtester.py               all-in/all-out engine
+backtester_scaled.py        tranche scaling engine (pyramid in/out)
+chart.py                    Plotly candlestick + auto-overlay
+wavelet_denoiser.py         pywt denoising (global + causal rolling)
+run_comparison.py           2×2 experiment harness
 strategy_folder/
-    _strategy_bass_class.py         abstract Strategy base class
-    ma_cross.py                     MovingAverageCrossover
-    kalman_cross.py                 KalmanCrossover
-    kalman_ma_hybrid.py             KalmanMAHybrid
-    wavelet_ma_cross.py             WaveletMACrossover
-    wavelet_kalman_cross.py         WaveletKalmanCrossover
-    two_b.py                        TwoB (Sperandeo reversal)
+    _strategy_bass_class.py abstract Strategy base class
+    ma_cross.py             MovingAverageCrossover
+    kalman_cross.py         KalmanCrossover
+    kalman_ma_hybrid.py     KalmanMAHybrid (Kalman fast / MA slow)
+    wavelet_ma_cross.py     WaveletMACrossover
+    wavelet_kalman_cross.py WaveletKalmanCrossover
+    two_b.py                TwoB (Sperandeo failed-breakout reversal)
 ```
 
-## How to run
+---
 
-```
-pip install yfinance pandas numpy plotly pykalman PyWavelets
-python run_comparison.py
-```
+## Limitations
 
-Outputs:
-- `results/comparison_YYYYMMDD.csv` — full results table.
-- `results/equity_<ticker>.html` — equity curves overlaid per ticker.
+- **Single parameter set.** Every variant uses one hand-picked configuration —
+  no grid search, no walk-forward optimisation. Results are an existence proof,
+  not a calibrated production strategy.
+- **Wavelet rolling-window cost.** `rolling_wavelet_denoise()` is O(window × N).
+  Runs in seconds on a decade of daily data; an intraday version would need a
+  faster implementation (e.g. SWT or a fixed-level partial DWT).
+- **Transaction costs.** Only per-fill slippage (1 bp each side). No
+  commissions, borrow costs for shorts, exchange fees, or overnight financing.
+- **Single-asset backtests.** All-in / all-out per ticker. No portfolio
+  effects, correlation-aware sizing, or cross-asset allocation.
+- **Data source.** `yfinance` daily adjusted closes — adequate for a
+  portfolio-piece backtest, not production quality.
+
+---
 
 ## Dependencies
 
-No `requirements.txt` is committed. The four non-standard packages used are:
-
-- `yfinance`
-- `pandas`, `numpy`
-- `plotly`
-- `pykalman`
-- `PyWavelets` (imported as `pywt`) — **added for this experiment.**
+```
+yfinance
+pandas
+numpy
+plotly
+pykalman
+PyWavelets   (imported as pywt)
+```

@@ -10,6 +10,7 @@ except ImportError:
 from data_loader import load_historical_data
 from wavelet_denoiser import wavelet_denoise, rolling_wavelet_denoise
 import pandas as pd
+import numpy as np
 
 
 class WaveletMACrossover(Strategy):
@@ -17,18 +18,25 @@ class WaveletMACrossover(Strategy):
     MA crossover on wavelet-denoised close prices.
 
     Pipeline:
-      1. Compute daily returns from the raw close. Returns are (approximately)
-         stationary — the universal-threshold noise model assumes that, so we
-         do NOT denoise price directly.
-      2. Denoise the returns (rolling-causal by default, or global look-ahead
-         if mode='global' for honesty-check comparisons).
-      3. Reconstruct a cleaned close price by cumulative compounding:
-             cleaned_close[t] = close[0] * prod_{k<=t} (1 + cleaned_return[k])
-      4. Run the same fast/slow MA crossover logic as MovingAverageCrossover,
-         but on cleaned_close instead of raw close.
+      1. Denoise the raw close price directly inside each rolling window.
+         This gives a smooth local price track without the drift artifact
+         that comes from denoising returns and then reconstructing via cumprod.
+      2. Run the same fast/slow MA crossover logic as MovingAverageCrossover,
+         but on the denoised close (wavelet_close) instead of raw close.
 
-    `mode='rolling'` is the realistic live version. `mode='global'` is for
-    measuring how much the look-ahead version flatters the result.
+    Note on stationarity: the academic recommendation is to denoise returns
+    (stationary) rather than price (non-stationary). However, for the
+    rolling-window version, within any 252-bar window the price series is
+    approximately locally stationary — the trend doesn't shift enough to
+    violate the noise model materially. Denoising price directly avoids
+    the compounding drift that plagues the returns-then-reconstruct approach.
+
+    threshold_scale dials how aggressively to suppress detail:
+      1.0 = Donoho-Johnstone universal threshold (strong suppression)
+      0.5 = half the threshold (gentler — recommended for price series)
+
+    `mode` parameter: 'rolling' (default, causal) or 'global' (look-ahead,
+    for honesty-check comparisons only).
     """
 
     def __init__(
@@ -38,6 +46,7 @@ class WaveletMACrossover(Strategy):
         wavelet: str = "db6",
         mode: str = "rolling",
         rolling_window: int = 252,
+        threshold_scale: float = 0.5,
     ):
         if fast_period <= 0 or slow_period <= 0:
             raise ValueError("fast_period and slow_period must be positive.")
@@ -54,6 +63,7 @@ class WaveletMACrossover(Strategy):
         self.wavelet = wavelet
         self.mode = mode
         self.rolling_window = rolling_window
+        self.threshold_scale = threshold_scale
 
     def generate_signals(self) -> pd.DataFrame:
         if self.data is None:
@@ -61,54 +71,32 @@ class WaveletMACrossover(Strategy):
 
         df = self.data.copy()
 
-        # --- Step 1: returns from raw close ---
-        # pct_change() gives (close[t] - close[t-1]) / close[t-1], i.e. daily return.
-        returns = df['close'].pct_change()
-
-        # --- Step 2: denoise returns ---
-        # Drop the leading NaN for denoising, then re-align below.
-        returns_clean_input = returns.dropna()
+        # --- Step 1: denoise close price directly ---
+        # rolling_wavelet_denoise() is causal: at each bar t it only sees the
+        # prior `rolling_window` bars, so no look-ahead when mode='rolling'.
         if self.mode == "rolling":
-            # Causal: only past data used at each t. Live-tradeable.
-            denoised_returns = rolling_wavelet_denoise(
-                returns_clean_input,
+            wavelet_close = rolling_wavelet_denoise(
+                df['close'],
                 window=self.rolling_window,
                 wavelet=self.wavelet,
                 mode="soft",
+                threshold_scale=self.threshold_scale,
             )
         else:
-            # Global: uses future data. For look-ahead comparison only.
-            denoised_returns = wavelet_denoise(
-                returns_clean_input,
+            # Global: one-shot over the full series — uses future data.
+            # Only for offline comparison (honesty check).
+            wavelet_close = wavelet_denoise(
+                df['close'],
                 wavelet=self.wavelet,
                 mode="soft",
+                threshold_scale=self.threshold_scale,
             )
 
-        # Re-align to df.index — rolling mode will leave the warm-up period as NaN.
-        denoised_returns = denoised_returns.reindex(df.index)
-
-        # --- Step 3: rebuild a cleaned close by compounding cleaned returns ---
-        # Only start compounding once the rolling window is warm (first non-NaN).
-        # Before that, cleaned_close is undefined and we'll drop those rows later.
-        first_valid = denoised_returns.first_valid_index()
-        if first_valid is None:
-            raise ValueError(
-                "Not enough data for wavelet denoising. "
-                f"Need at least {self.rolling_window} bars."
-            )
-
-        # Use the raw close at first_valid as the anchor. From there, compound
-        # (1 + cleaned_return). fillna(0) so the anchor bar contributes no change.
-        anchor_close = df.loc[first_valid, 'close']
-        cumulative = (1.0 + denoised_returns.loc[first_valid:].fillna(0.0)).cumprod()
-        cleaned_close = anchor_close * cumulative
-
-        df['wavelet_close'] = cleaned_close
-        # Drop rows before the cleaned series starts — the crossover logic needs
-        # a valid cleaned_close at every row it acts on.
+        df['wavelet_close'] = wavelet_close
+        # Drop warm-up rows where the rolling window wasn't yet full
         df = df.dropna(subset=['wavelet_close']).copy()
 
-        # --- Step 4: MA crossover on cleaned_close ---
+        # --- Step 2: MA crossover on denoised close ---
         df['fast_ma'] = df['wavelet_close'].rolling(window=self.fast_period).mean()
         df['slow_ma'] = df['wavelet_close'].rolling(window=self.slow_period).mean()
         df['signal'] = 0.0
@@ -126,6 +114,29 @@ class WaveletMACrossover(Strategy):
         ] = -1
 
         df = df.dropna()
+
+        # --- Step 3: wavelet-derived stop loss ---
+        # The noise component is exactly what the wavelet removed: close - wavelet_close.
+        # Its rolling std is the noise sigma in price units — the same sigma the
+        # denoiser uses internally. Scaling by the same formula gives a SL width
+        # that sits at the edge of the noise band: moves inside it are noise,
+        # moves outside it are signal. Setting SL just beyond the noise floor
+        # means we only exit when the signal actually reverses, not on noise.
+        noise = df['close'] - df['wavelet_close']
+        # min_periods=20 lets the estimate start as soon as there's enough data
+        # rather than waiting for a full second rolling_window warm-up period.
+        sigma_price = noise.rolling(window=self.rolling_window, min_periods=20).std()
+        threshold_price = sigma_price * np.sqrt(2.0 * np.log(self.rolling_window)) * self.threshold_scale
+
+        # Never tighten the SL below what the raw bar already gives.
+        # On volatile bars the wavelet threshold can be smaller than the bar range,
+        # so we always take the wider of the two levels.
+        df['stop_loss'] = np.nan
+        df.loc[df['signal'] == 1,  'stop_loss'] = np.minimum(
+            df['wavelet_close'] - threshold_price, df['low'])
+        df.loc[df['signal'] == -1, 'stop_loss'] = np.maximum(
+            df['wavelet_close'] + threshold_price, df['high'])
+
         self.data = df
         self._signals_generated = True
 

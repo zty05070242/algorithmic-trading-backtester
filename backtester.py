@@ -59,6 +59,10 @@ class Backtester:
         # and the earliest you can realistically execute is the next bar's open.
         pending_signal = 0
         pending_sl = 0.0                    # signal bar's low (long) or high (short)
+        # If the strategy provides a 'stop_loss' column, use it instead of bar low/high.
+        # This lets strategies set smarter SL levels (e.g. wavelet noise floor).
+        # Falls back to bar low/high when the column is absent or the value is NaN.
+        has_custom_sl = 'stop_loss' in df.columns
 
         for date, row in df.iterrows():
 
@@ -160,11 +164,14 @@ class Backtester:
 
             # Capture this bar's signal and SL level for execution on the NEXT bar
             pending_signal = int(row['signal'])
-            # SL = this bar's low for longs, high for shorts (known at close)
             if pending_signal == 1:
-                pending_sl = row['low']
+                pending_sl = (row['stop_loss']
+                              if has_custom_sl and pd.notna(row['stop_loss'])
+                              else row['low'])
             elif pending_signal == -1:
-                pending_sl = row['high']
+                pending_sl = (row['stop_loss']
+                              if has_custom_sl and pd.notna(row['stop_loss'])
+                              else row['high'])
 
             # === Record equity AFTER processing this bar ===
             self.equity_curve.append({
@@ -266,9 +273,11 @@ if __name__ == "__main__":
     from strategy_folder.kalman_cross import KalmanCrossover
     from strategy_folder.ma_cross import MovingAverageCrossover
     from strategy_folder.kalman_ma_hybrid import KalmanMAHybrid
+    from strategy_folder.wavelet_kalman_cross import WaveletKalmanCrossover
+    from strategy_folder.wavelet_ma_cross import WaveletMACrossover
 
     df = load_historical_data("^GSPC", "2000-01-01", "2026-04-15")
-    strategy = KalmanMAHybrid(fast_cov=0.01, slow_period=20)
+    strategy = KalmanCrossover(fast_cov=0.01, slow_cov=0.001)
     backtester = Backtester(initial_balance=10000, risk_pct=0.02, slippage_pct=0.0001)
     results = backtester.run(df, strategy, verbose=True)
 

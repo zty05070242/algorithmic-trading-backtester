@@ -71,6 +71,7 @@ class BacktesterScaled:
 
         pending_signal = 0
         pending_sl = 0.0
+        has_custom_sl = 'stop_loss' in df.columns
 
         for date, row in df.iterrows():
 
@@ -181,9 +182,13 @@ class BacktesterScaled:
             # Capture signal for next bar execution
             pending_signal = int(row['signal'])
             if pending_signal == 1:
-                pending_sl = row['low']
+                pending_sl = (row['stop_loss']
+                              if has_custom_sl and pd.notna(row['stop_loss'])
+                              else row['low'])
             elif pending_signal == -1:
-                pending_sl = row['high']
+                pending_sl = (row['stop_loss']
+                              if has_custom_sl and pd.notna(row['stop_loss'])
+                              else row['high'])
 
             # Record equity
             self.equity_curve.append({
