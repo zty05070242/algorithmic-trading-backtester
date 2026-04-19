@@ -1,24 +1,21 @@
 # Algorithmic Trading Backtester
 
 A modular Python backtesting framework for daily-bar trend-following strategies,
-with a built-in experiment comparing Kalman filtering and wavelet denoising as
-signal pre-processing front-ends.
+with an experiment comparing Kalman filtering and wavelet denoising as
+signal pre-processing tools.
 
 ## Overview
 
 The project has two layers:
 
-1. **The backtesting engine** — a reusable framework for loading data, sizing
+1. **The backtesting engine** - a reusable framework for loading data, sizing
    positions, running strategies, and computing performance metrics.
 2. **The signal-extraction experiment** — a 2×2 comparison asking whether
    applying Kalman filtering or wavelet denoising before a crossover strategy
-   improves performance on S&P 500 and silver futures.
+   improves its performance.
 
-The motivation comes from DSP: price series and audio signals share the same
-problem — a latent signal buried in additive noise that must be recovered
-*causally*, without peeking at future samples. This project transplants two
-standard DSP tools into the signal generation step of a trend-following
-backtester.
+The motivation comes from by background as a Tonmeister. Like audio signals, prices contain noise that disrupt the generation of trading signals.
+This project aims to build Kalman filtering and wavelet denoising into the signal generation step of a backtester.
 
 ---
 
