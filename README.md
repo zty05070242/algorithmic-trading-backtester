@@ -10,12 +10,13 @@ The project has two layers:
 
 1. **The backtesting engine** - a reusable framework for loading data, sizing
    positions, running strategies, and computing performance metrics.
-2. **The signal-extraction experiment** — a 2×2 comparison asking whether
+2. **The signal-extraction experiment** — a comparison asking whether
    applying Kalman filtering or wavelet denoising before a crossover strategy
-   improves its performance.
+   improves its performance. This experiment is inspired by Stefan Jansen - "Machine Learning for Algorithmic Trading".
+
 
 The motivation comes from by background as a Tonmeister. Like audio signals, prices contain noise that disrupt the generation of trading signals.
-This project aims to build Kalman filtering and wavelet denoising into the signal generation step of a backtester.
+This project aims to build Kalman filter and wavelet denoising into the signal generation step of a backtester.
 
 ---
 
@@ -60,7 +61,7 @@ low/high.
 units = (account_balance × risk_pct) / |entry_price − stop_loss|
 ```
 
-Takes `account_balance`, `entry_price`, `stop_loss_price`, `risk_pct`.
+Inspired by the 2% rule. Takes `account_balance`, `entry_price`, `stop_loss_price`, `risk_pct`.
 Returns a dict with `units_to_trade`, `position_size`, `direction`, and
 supporting fields.
 
@@ -110,7 +111,7 @@ Saves to HTML.
 | [wavelet_kalman_cross.py](strategy_folder/wavelet_kalman_cross.py) | `WaveletKalmanCrossover` | Trend | Dual Kalman crossover on wavelet-denoised close |
 | [two_b.py](strategy_folder/two_b.py) | `TwoB` | Reversal | Sperandeo 2B Rule — failed breakout reversal |
 
-### 2B Rule (Sperandeo)
+### The 2B Rule (Sperandeo)
 
 Victor Sperandeo's failed-breakout reversal pattern:
 
@@ -131,7 +132,7 @@ Can wavelet denoising or Kalman filtering improve a standard crossover strategy
 when applied as a pre-processing step? And do they improve it for the *same*
 reason, or different reasons?
 
-### 2×2 grid
+### Strategies in Experiment
 
 | # | Label | Fast line | Slow line |
 |---|-------|-----------|-----------|
@@ -140,25 +141,25 @@ reason, or different reasons?
 | 3 | `Wavelet+MA/MA` | SMA(20) of denoised close | SMA(50) of denoised close |
 | 4 | `Wavelet+Kalman` | Kalman(fast) of denoised close | Kalman(slow) of denoised close |
 
-### Wavelet denoising details
+### Wavelet denoising details (with the help from Claude Code)
 
 Implemented in [wavelet_denoiser.py](wavelet_denoiser.py).
 
 **Algorithm:** Donoho-Johnstone universal threshold.
-1. Discrete wavelet transform (DWT) decomposes the signal into a coarse
+1. Discrete wavelet transform (DWT) decomposes the price into a coarse
    approximation + a pyramid of detail coefficient bands.
 2. Estimate noise `sigma` from the finest detail band via MAD:
    `sigma = median(|cD1|) / 0.6745`
 3. Apply threshold `sigma * sqrt(2 * log(n)) * threshold_scale` to every
    detail band (soft shrinkage).
-4. Inverse DWT reconstructs the cleaned signal.
+4. Inverse DWT reconstructs the cleaned price.
 
-**Why price directly, not returns:** the original approach denoised returns and
+**Why I denoised price directly, not returns:** My original approach denoised returns and
 reconstructed price via `cumprod()`. The universal threshold (~2.8% at 252
-bars) zeros out almost every daily return, leaving a staircase that drifts
+bars) zeros out almost every daily return, so the reconstructed price drifts
 upward in bull markets when compounded. Within a 252-bar rolling window the
 price series is approximately locally stationary, so the noise model is still
-valid, and denoising price directly avoids the drift artifact.
+valid, and denoising price directly avoids the drift.
 
 **`threshold_scale=0.5`:** half the Donoho-Johnstone threshold. The full
 universal threshold is designed for worst-case noise recovery in stationary
@@ -167,11 +168,11 @@ while still suppressing fine-scale noise.
 
 **Causal implementation:** `rolling_wavelet_denoise()` slides a 252-bar window
 and keeps only the last reconstructed value at each step — no future data ever
-feeds into the estimate at time `t`. This is the same causality guarantee as
+feeds into the estimate at time `t`. This avoids lookahead bias and is the same causality guarantee as
 `pykalman.KalmanFilter.filter()` (vs `.smooth()`, which is non-causal).
 
 **Honesty check:** wavelet strategies also expose `mode='global'` (full-series
-one-shot, uses future data) for comparison. If the global Sharpe is materially
+one-shot, uses future data) for comparison. If the global Sharpe is 
 higher than the rolling Sharpe, the offline version was cheating. The
 comparison harness flags any gap > 0.5 Sharpe.
 
@@ -213,8 +214,7 @@ denoiser are both low-pass filters operating on overlapping frequency bands.
 Stacking them makes the slow MA track the trend so tightly that any minor
 pullback causes the fast MA to cross back below it — generating premature exits.
 The baseline holds winners for an average of £4,758; the wavelet version exits
-the same trends for only £724. No stop-loss adjustment fixes this: it is the
-exit signal timing that breaks, not the risk management.
+the same trends for only £724. Adjusting to a wider stop-loss didn't fix this: it is bad signal timing, not the risk management.
 
 ### Finding 2 — Wavelet preprocessing is complementary before Kalman crossover
 
@@ -250,21 +250,11 @@ terms (Sharpe, drawdown), not raw return.
 
 ---
 
-## Results
+## Results Table
 
-Full multi-ticker results from `python run_comparison.py` (tickers: `^GSPC`,
-`SI=F`; start 2015-01-01). To be filled in after running.
+Full multi-ticker results from `python run_comparison.py`. To be filled in after running.
 
-### S&P 500 (^GSPC)
-
-| Strategy | Sharpe | Max DD % | Total Return % | Trades | Win % | PF | Expectancy (£) |
-|----------|-------:|---------:|---------------:|-------:|------:|---:|---------------:|
-| MA/MA | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
-| Kalman/MA | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
-| Wavelet+MA/MA | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
-| Wavelet+Kalman | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
-
-### Silver Futures (SI=F)
+### TICKER
 
 | Strategy | Sharpe | Max DD % | Total Return % | Trades | Win % | PF | Expectancy (£) |
 |----------|-------:|---------:|---------------:|-------:|------:|---:|---------------:|
@@ -272,11 +262,6 @@ Full multi-ticker results from `python run_comparison.py` (tickers: `^GSPC`,
 | Kalman/MA | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
 | Wavelet+MA/MA | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
 | Wavelet+Kalman | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
-
-### Honesty check (rolling vs global wavelet Sharpe)
-
-Fill in after running. The closer these are, the less the global version was
-flattering itself with future data.
 
 ---
 
@@ -331,7 +316,7 @@ strategy_folder/
   Runs in seconds on a decade of daily data; an intraday version would need a
   faster implementation (e.g. SWT or a fixed-level partial DWT).
 - **Transaction costs.** Only per-fill slippage (1 bp each side). No
-  commissions, borrow costs for shorts, exchange fees, or overnight financing.
+  commissions, borrow costs for shorts, exchange fees, or overnight fees.
 - **Single-asset backtests.** All-in / all-out per ticker. No portfolio
   effects, correlation-aware sizing, or cross-asset allocation.
 - **Data source.** `yfinance` daily adjusted closes — adequate for a
