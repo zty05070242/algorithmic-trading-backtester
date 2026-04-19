@@ -110,6 +110,7 @@ Saves to HTML.
 | [wavelet_ma_cross.py](strategy_folder/wavelet_ma_cross.py) | `WaveletMACrossover` | Trend | SMA crossover on wavelet-denoised close |
 | [wavelet_kalman_cross.py](strategy_folder/wavelet_kalman_cross.py) | `WaveletKalmanCrossover` | Trend | Dual Kalman crossover on wavelet-denoised close |
 | [two_b.py](strategy_folder/two_b.py) | `TwoB` | Reversal | Sperandeo 2B Rule — failed breakout reversal |
+| [wavelet_kalman_calibrate.py](wavelet_kalman_calibrate.py) | — | Analysis | Offline spectral calibration: derives Kalman Q from wavelet band energies |
 
 ### The 2B Rule (Sperandeo)
 
@@ -247,6 +248,64 @@ noise removal, Kalman handles adaptive trend tracking.
 **Summary:** wavelet denoising adds value as a front-end to an adaptive tracker
 (Kalman), not to a fixed smoother (MA). The improvement is in risk-adjusted
 terms (Sharpe, drawdown), not raw return.
+
+### Finding 4 — Wavelet spectral calibration of Kalman Q (academic, offline)
+
+[wavelet_kalman_calibrate.py](wavelet_kalman_calibrate.py) uses a global
+(look-ahead) DWT of returns to derive data-driven Q parameters for the Kalman
+crossover, rather than hand-tuning them. The method:
+
+1. Decompose returns with a full-depth DWT (`db6`).
+2. Compute per-band energy. SNR = band energy / noise floor energy (noise
+   estimated from the finest detail band via MAD).
+3. Find the two highest-SNR bands (at least one octave apart).
+4. Convert each band's centre period `T` to Kalman Q via `Q = 4 / (T² − 1)` —
+   derived from the steady-state gain `K = 2/(T+1)` of the 1D random-walk
+   Kalman model with R=1.
+
+**Spectral output (`^GSPC`, 2000–2026, db6):**
+
+| Level | Period (bars) | SNR | → Kalman Q |
+|------:|:-------------:|----:|----------:|
+| 1 | 2–4 | 2.26 | 0.571 |
+| 2 | 4–8 | 1.94 | 0.129 |
+| 3 | 8–16 | **1.95** | **0.031** |
+| 4 | 16–32 | 1.43 | 0.008 |
+| 5 | 32–64 | 1.68 | 0.002 |
+| 6 | 64–128 | 1.48 | 0.000 |
+| 7 | 128–256 | 1.38 | 0.000 |
+| 8 | 256–512 | 1.48 | 0.000 |
+| 9 | 512–1024 | **4.97** | **0.000008** |
+
+Dominant bands: level 3 (11-bar, SNR=1.95) and level 9 (724-bar, SNR=4.97).
+Derived parameters: `fast_cov=0.031`, `slow_cov=0.000008`.
+
+**Comparison vs hand-tuned (`^GSPC` 2000–2026):**
+
+| Metric | Hand-tuned (20/63-bar) | Wavelet-derived (11/724-bar) |
+|--------|:---------------------:|:---------------------------:|
+| Total return | **312%** | 87% |
+| Sharpe ratio | **0.19** | **0.19** |
+| Max drawdown | −64% | **−32%** |
+| Win rate | 8% | **15%** |
+| Trades | 100 | 40 |
+
+**Finding:** the spectral method correctly identifies the two mathematically
+dominant signal frequencies — the ~2-year market cycle (level 9, SNR≈5) and a
+short-term noise band (level 3). However, *dominant signal ≠ most profitable
+to trade*. The 724-bar slow Kalman is so sluggish that it fires only 40 trades
+in 26 years, missing most intermediate-term trends. The result is equal
+Sharpe but a quarter of the raw return.
+
+The hand-tuned parameters (20/63 bars) land in the intermediate frequency
+range (levels 4–5), which the spectral analysis shows as relatively flat in
+SNR (1.4–1.7) — not the mathematically dominant bands, but the most
+*tradeable* ones given the signal structure.
+
+**Academic caveat:** this calibration uses the full 2000–2026 series, so the
+derived Q values carry look-ahead bias and cannot be used for live trading
+as-is. For production use, re-calibrate on a rolling training window and
+re-apply to the subsequent out-of-sample period.
 
 ---
 
