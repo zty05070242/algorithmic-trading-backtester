@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 from typing import Dict
-from practice_position_sizer import calculate_position_size
+from misc.fiddle_position_sizer import calculate_position_size
 
 class Backtester():
     def __init__(self, initial_balance:float=1000, risk_pct:float=0.02, slippage_pct:float=0.001):
@@ -58,8 +58,8 @@ class Backtester():
 
 if __name__ == "__main__":
 
-    from practice_data_loader import load_historical_data
-    from practice_ma_cross import MovingAverageCrossover
+    from misc.fiddle_data_loader import load_historical_data
+    from misc.fiddle_ma_cross import MovingAverageCrossover
 
     df = load_historical_data("NVDA", "2020-01-01", "2024-01-01")
     strategy = MovingAverageCrossover(10, 20)

@@ -1,5 +1,5 @@
-from practice_strategy_base_class import Strategy
-from practice_data_loader import load_historical_data
+from misc.fiddle_strategy_base_class import Strategy
+from misc.fiddle_data_loader import load_historical_data
 
 class MovingAverageCrossover(Strategy):
     def __init__(self, fast_period:int=10, slow_period:int=20):
