@@ -59,6 +59,7 @@ class Backtester:
         # and the earliest you can realistically execute is the next bar's open.
         pending_signal = 0
         pending_sl = 0.0                    # signal bar's low (long) or high (short)
+        pending_exit = False
         # If the strategy provides a 'stop_loss' column, use it instead of bar low/high.
         # This lets strategies set smarter SL levels (e.g. wavelet noise floor).
         # Falls back to bar low/high when the column is absent or the value is NaN.
@@ -72,24 +73,16 @@ class Backtester:
                     (self.current_direction == 1 and row['low'] <= self.stop_loss) or
                     (self.current_direction == -1 and row['high'] >= self.stop_loss)
                 )
-                opposite_signal = (
-                    (self.current_direction == 1 and row['signal'] == -1) or
-                    (self.current_direction == -1 and row['signal'] == 1)
-                )
                 if sl_hit:
-                    # Apply slippage: SL fill is worse than the SL level
                     if self.current_direction == 1:
-                        exit_price = self.stop_loss * (1 - self.slippage_pct)  # long SL slips lower
+                        exit_price = self.stop_loss * (1 - self.slippage_pct)
                     else:
-                        exit_price = self.stop_loss * (1 + self.slippage_pct)  # short SL slips higher
-                elif opposite_signal:
-                    # Exit at next bar's open would add complexity; for exits we use
-                    # the close with slippage as a reasonable approximation — you see
-                    # the signal forming and can place a market-on-close order.
+                        exit_price = self.stop_loss * (1 + self.slippage_pct)
+                elif pending_exit:
                     if self.current_direction == 1:
-                        exit_price = row['close'] * (1 - self.slippage_pct)  # selling: slips lower
+                        exit_price = row['open'] * (1 - self.slippage_pct)
                     else:
-                        exit_price = row['close'] * (1 + self.slippage_pct)  # covering short: slips higher
+                        exit_price = row['open'] * (1 + self.slippage_pct)
                 else:
                     exit_price = None
 
@@ -121,6 +114,16 @@ class Backtester:
                     self.trade_open = False
                     self.position = 0.0
                     self.current_direction = 0
+
+            # Capture opposite signal for next bar exit
+            if self.trade_open:
+                opposite_signal = (
+                    (self.current_direction == 1 and row['signal'] == -1) or
+                    (self.current_direction == -1 and row['signal'] == 1)
+                )
+                pending_exit = opposite_signal
+            else:
+                pending_exit = False
 
             # === ENTRY: execute pending signal from previous bar at today's open ===
             if not self.trade_open and pending_signal != 0 and self.current_balance > 0:
