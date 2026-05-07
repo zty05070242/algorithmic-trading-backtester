@@ -1,5 +1,5 @@
 import pandas as pd
-import numpy as np                          # numpy lets us do maths on arrays efficiently
+import numpy as np
 from typing import Dict
 from position_sizer import calculate_position_size
 
@@ -11,12 +11,11 @@ class Backtester:
     Position sizing via position_sizer().
     """
 
-    def __init__(self, initial_balance: float = 6000.0, risk_pct: float = 0.02,
-                 slippage_pct: float = 0.0):
+    def __init__(self, initial_balance: float = 6000.0, risk_pct: float = 0.02, slippage_pct: float = 0.0):
         self.initial_balance = initial_balance
         self.risk_pct = risk_pct
-        self.slippage_pct = slippage_pct    # combined spread + slippage cost per fill
-        self._reset()                       # Use a reset method so run() can call it cleanly
+        self.slippage_pct = slippage_pct    # Combined spread + slippage cost per fill.
+        self._reset()                       # Use a reset method so run() can call it cleanly.
 
     def _reset(self):
         """Reset all state — called before each backtest run."""
@@ -33,12 +32,10 @@ class Backtester:
     def run(self, data: pd.DataFrame, strategy, verbose: bool = True) -> Dict:
         """
         Run the backtest on a dataset using a given strategy.
-
         Args:
             data: OHLCV DataFrame from data_loader.
             strategy: Any Strategy subclass instance.
             verbose: If True, prints trade-by-trade output.
-
         Returns:
             Dictionary of performance metrics and trade log.
         """
@@ -53,40 +50,40 @@ class Backtester:
             print(f"Risk per trade : {self.risk_pct * 100:.1f}%")
             print(f"Slippage       : {self.slippage_pct * 100:.3f}%\n")
 
-        # pending_signal holds the signal from the previous bar,
-        # so we enter on the NEXT bar's open instead of the signal bar's close.
-        # This removes look-ahead bias: you see the close, decide to trade,
-        # and the earliest you can realistically execute is the next bar's open.
+        # pending_signal holds the signal from the previous bar, so we enter on the NEXT bar's open instead of the signal bar's close.
+        # This removes look-ahead bias: you see the close, decide to trade, and the earliest you can realistically execute is the next bar's open.
+        # Every variable with pending_ in the name is a one-day delay. Set today, used tomorrow.
         pending_signal = 0
-        pending_sl = 0.0                    # signal bar's low (long) or high (short)
+        pending_sl = 0.0                    # Signal bar's low (long) or high (short).
         pending_exit = False
-        # If the strategy provides a 'stop_loss' column, use it instead of bar low/high.
-        # This lets strategies set smarter SL levels (e.g. wavelet noise floor).
-        # Falls back to bar low/high when the column is absent or the value is NaN.
+
+        # If the strategy provides a 'stop_loss' column, use it instead of bar low/high. Falls back to bar low/high when the column is absent or the value is NaN.
         has_custom_sl = 'stop_loss' in df.columns
 
-        for date, row in df.iterrows():
+# ========================================================================================== Backtesting loop starts here. ==========================================================================================
+        for date, row in df.iterrows():     
 
-            # === EXIT: stop loss hit or opposite signal ===
+            # ============================================================ EXIT RULE ============================================================
+            # ============ Check: sl_hit or pending_exit or else ============
             if self.trade_open:
-                sl_hit = (
-                    (self.current_direction == 1 and row['low'] <= self.stop_loss) or
-                    (self.current_direction == -1 and row['high'] >= self.stop_loss)
-                )
+                sl_hit:bool = (self.current_direction == 1 and row['low'] <= self.stop_loss) or (self.current_direction == -1 and row['high'] >= self.stop_loss)
+                # sl_hit = True if (going long AND the low hits stop loss price) OR (going short AND the high hits stop loss price)
                 if sl_hit:
-                    if self.current_direction == 1:
+                    if self.current_direction == 1:     # Long position: exit immediately
                         exit_price = self.stop_loss * (1 - self.slippage_pct)
-                    else:
+                    else:                               # Short position: exit immediately
                         exit_price = self.stop_loss * (1 + self.slippage_pct)
-                elif pending_exit:
-                    if self.current_direction == 1:
+            
+                elif pending_exit:          # Pending exit is set True/False. See line 114. If pending_exit = True, there is an opposite signal.
+                    if self.current_direction == 1:     # Long position: exit at the next bar's open (ensure no lookahead bias).
                         exit_price = row['open'] * (1 - self.slippage_pct)
-                    else:
+                    else:                               # Short position: exit at the next bar's open (ensure no lookahead bias).
                         exit_price = row['open'] * (1 + self.slippage_pct)
-                else:
+                
+                else:       # If neither stop loss hit or opposite signal, there's no exit price. We keep the position.
                     exit_price = None
 
-                if exit_price is not None:
+                if exit_price is not None:      # If there is an exit price (we close a position), we calculate and update the self.trades[] list.
 
                     # Multiply by direction: long profits when price rises, short when it falls
                     pnl = (exit_price - self.entry_price) * self.position * self.current_direction
@@ -108,73 +105,59 @@ class Backtester:
                     if verbose:
                         direction_label = "LONG" if self.current_direction == 1 else "SHORT"
                         exit_reason = "SL HIT" if sl_hit else "SIGNAL"
-                        print(f"Balance: £{self.current_balance:,.2f} | CLOSED {direction_label} on {date.date()} | "
-                              f"{self.position:.4f} units @ £{exit_price:.2f} | PnL: £{pnl:.2f} ({pnl_pct:.2f}%) | {exit_reason}")
+                        print(f"Balance: £{self.current_balance:,.2f} | CLOSED {direction_label} on {date.date()} | {self.position:.4f} units @ £{exit_price:.2f} | PnL: £{pnl:.2f} ({pnl_pct:.2f}%) | {exit_reason}")
 
                     self.trade_open = False
                     self.position = 0.0
                     self.current_direction = 0
 
-            # Capture opposite signal for next bar exit
+            # ============ Opposite Signal ============
             if self.trade_open:
-                opposite_signal = (
-                    (self.current_direction == 1 and row['signal'] == -1) or
-                    (self.current_direction == -1 and row['signal'] == 1)
-                )
-                pending_exit = opposite_signal
+                opposite_signal:bool = (self.current_direction == 1 and row['signal'] == -1) or (self.current_direction == -1 and row['signal'] == 1)
+                pending_exit = opposite_signal      # Sets whether pendind_exit is True or False based on whether or not opposite signal appears.
             else:
                 pending_exit = False
 
-            # === ENTRY: execute pending signal from previous bar at today's open ===
+            # ============================================================ ENTRY RULE ============================================================
             if not self.trade_open and pending_signal != 0 and self.current_balance > 0:
                 direction = pending_signal
 
                 # Entry at this bar's open, with slippage making the fill worse
                 if direction == 1:
-                    entry_price = row['open'] * (1 + self.slippage_pct)   # buying: slips higher
+                    entry_price = row['open'] * (1 + self.slippage_pct)   # Long position: slips higher
                 else:
-                    entry_price = row['open'] * (1 - self.slippage_pct)   # shorting: slips lower
+                    entry_price = row['open'] * (1 - self.slippage_pct)   # Short position: slips lower
 
-                # Stop loss: from the SIGNAL bar (t), not the entry bar (t+1)
-                # We already know this level when we decide to trade
-                stop_loss = pending_sl
+                # Stop loss: from the SIGNAL bar (t), not the entry bar (t+1). We already know this level when we decide to trade.
+                stop_loss = pending_sl          # pending_sl is set below. See line 155.
 
-                # Skip trade if entry price equals stop loss — no room for a valid SL
+                # Skip trade if entry price equals stop loss — no room for a valid SL.
                 if stop_loss == entry_price:
                     pending_signal = 0
                     self.equity_curve.append({'date': date, 'balance': self.current_balance})
                     continue
 
-                sizing = calculate_position_size(
-                    account_balance=self.current_balance,
-                    risk_pct=self.risk_pct,
-                    entry_price=entry_price,
-                    stop_loss_price=stop_loss
-                )
+                # Call the position sizer to calculate appropriate units to trade.
+                sizing = calculate_position_size(account_balance=self.current_balance, risk_pct=self.risk_pct, entry_price=entry_price, stop_loss_price=stop_loss)
 
-                max_units = (self.current_balance * 20) / entry_price  # 20x max leverage
+                max_units = (self.current_balance * 20) / entry_price  # 20x max leverage cap. Can't go more than this. 
                 self.position = min(sizing['units_to_trade'], max_units)
                 self.entry_price = entry_price
-                self.stop_loss = sizing['stop_loss']
+                self.stop_loss = stop_loss
                 self.entry_date = date
                 self.trade_open = True
                 self.current_direction = direction
 
                 if verbose:
                     direction_label = sizing['direction'].upper()
-                    print(f"Balance: £{self.current_balance:,.2f} | OPENED {direction_label} on {date.date()} | "
-                          f"{self.position:.4f} units @ £{entry_price:.2f} | SL: £{stop_loss:.2f}")
+                    print(f"Balance: £{self.current_balance:,.2f} | OPENED {direction_label} on {date.date()} | {self.position:.4f} units @ £{entry_price:.2f} | SL: £{stop_loss:.2f}")
 
             # Capture this bar's signal and SL level for execution on the NEXT bar
             pending_signal = int(row['signal'])
             if pending_signal == 1:
-                pending_sl = (row['stop_loss']
-                              if has_custom_sl and pd.notna(row['stop_loss'])
-                              else row['low'])
+                pending_sl = row['stop_loss'] if has_custom_sl and pd.notna(row['stop_loss']) else row['low']
             elif pending_signal == -1:
-                pending_sl = (row['stop_loss']
-                              if has_custom_sl and pd.notna(row['stop_loss'])
-                              else row['high'])
+                pending_sl = row['stop_loss'] if has_custom_sl and pd.notna(row['stop_loss']) else row['high']
 
             # === Record equity AFTER processing this bar ===
             self.equity_curve.append({
@@ -187,6 +170,7 @@ class Backtester:
             final_price = df.iloc[-1]['close']
             pnl = (final_price - self.entry_price) * self.position * self.current_direction
             self.current_balance += pnl
+            self.equity_curve.append({'date': df.index[-1], 'balance': self.current_balance})
             if verbose:
                 print(f"\nForce-closed open position at end of data | PnL: £{pnl:.2f}")
 
