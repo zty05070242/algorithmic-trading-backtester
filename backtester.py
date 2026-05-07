@@ -264,7 +264,7 @@ if __name__ == "__main__":
     from strategy_folder.wavelet_ma_cross import WaveletMACrossover
 
     df = load_historical_data("^GSPC", "2000-01-01", "2026-04-15")
-    strategy = KalmanCrossover(fast_cov=0.01, slow_cov=0.001)
+    strategy = MovingAverageCrossover(fast_period=10, slow_period=20)
     backtester = Backtester(initial_balance=10000, risk_pct=0.02, slippage_pct=0.0001)
     results = backtester.run(df, strategy, verbose=True)
 

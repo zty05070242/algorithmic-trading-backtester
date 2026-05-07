@@ -1,12 +1,4 @@
-import sys
-import os
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-try:
-    from ._strategy_bass_class import Strategy
-except ImportError:
-    from _strategy_bass_class import Strategy
-
+from strategy_folder._strategy_base_class import Strategy
 from data_loader import load_historical_data
 from wavelet_denoiser import wavelet_denoise, rolling_wavelet_denoise
 import pandas as pd
