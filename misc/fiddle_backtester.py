@@ -58,11 +58,11 @@ class Backtester():
 
 
                     self.trades.append({
-                        "Entry Date": self.entry_date,
-                        "Exit Date": date,
+                        "Entry_Date": self.entry_date,
+                        "Exit_Date": date,
                         "Direction": "LONG" if self.current_direction == 1 else "SHORT",
-                        "Entry Price": self.entry_price,
-                        "Exit Price": exit_price,
+                        "Entry_Price": self.entry_price,
+                        "Exit_Price": exit_price,
                         "PnL": pnl,
                         "PnL_pct": f"{pnl_pct}%"
                     })
@@ -102,7 +102,7 @@ class Backtester():
                     pending_signal = 0
                     self.equity_curve.append({
                         "Date": date,
-                        "Current Balance": self.current_balance
+                        "Balance": self.current_balance
                     })
                     continue
 
@@ -135,7 +135,7 @@ class Backtester():
             
             self.equity_curve.append({
                 "Date": date,
-                "Current Balance": self.current_balance
+                "Balance": self.current_balance
             })
         # ========================================== Force liquidate any remaining positions at the end of data ==========================================
         if self.trade_open:
@@ -144,14 +144,93 @@ class Backtester():
             self.current_balance += pnl
             self.equity_curve.append({
                 "Date": df.index[-1],
-                "Current Balance": self.current_balance
+                "Balance": self.current_balance
             })
             if verbose:
                 print(f"\nForce-closed open position at end of data | PnL: £{pnl:.2f}")
 
         # ====================================================== Metrics Calculation ======================================================
         metrics = self._calculate_metrics()
+        if verbose:
+            print(f"Final Balance:  ${metrics['Final_Balance']:,.2f}")
+            print(f"Return:          {metrics['Total_Return_pct']:,.2f}%")
+            print(f"Trade Count:     {metrics['Trade_Count']:,}")
+            print(f"Win Rate:        {metrics['Win_Rate']:.2f}%")
+            print(f"Sharpe Ratio:    {metrics['Sharpe']:.2f}")
+            print(f"Max Drawdown:    {metrics['Max_Drawdown']:.2f}%")
+            print(f"Profit Factor:   {metrics['Profit_Factor']:.2f}")
+            print(f"Avg Win:        ${metrics['Avg_Win']:,.2f}")
+            print(f"Avg Loss:       ${metrics['Avg_Loss']:,.2f}")
+            print(f"Expectancy:     ${metrics['Expectancy']:,.2f}")
+            print(f"Largest Win:    ${metrics['Largest_Win']:,.2f}")
+            print(f"Largest Loss:    ${metrics['Largest_Loss']:,.2f}")
+            
+            
+
+
         return metrics
+        
+    def _calculate_metrics(self):
+        
+        # 1. Total Return % 
+        total_return_pct = (self.current_balance - self.initial_balance) / self.initial_balance * 100
+
+        # 2. Trade counts and win rate 
+        num_trades = len(self.trades)
+        winning_trades = [t for t in self.trades if t['PnL'] > 0]
+        win_rate = len(winning_trades) / num_trades if num_trades > 0 else 0
+
+        # 3. Sharpe ratio
+        equity_df = pd.DataFrame(self.equity_curve)
+        daily_returns = equity_df['Balance'].pct_change().dropna() 
+        if daily_returns.std() > 0:
+            sharpe = (daily_returns.mean() / daily_returns.std()) * np.sqrt(252)
+        else:
+            sharpe = 0.0
+
+        # 4. Max drawdown
+        rolling_max = equity_df['Balance'].cummax()
+        drawdown = (equity_df['Balance'] - rolling_max) / rolling_max
+        max_drawdown_pct = drawdown.min() * 100
+
+        # 5. Profit factor
+        gross_profit = sum(t['PnL'] for t in self.trades if t['PnL'] > 0)
+        gross_loss = abs(sum(t['PnL'] for t in self.trades if t['PnL'] < 0))
+        profit_factor = round(gross_profit / gross_loss, 2) if gross_loss > 0 else float('inf')
+
+        # 6. Average win & average loss
+        losing_trades = [t for t in self.trades if t['PnL'] < 0]
+        avg_win = round(gross_profit / len(winning_trades), 2) if winning_trades else 0
+        avg_loss = round(gross_loss / len(losing_trades), 2) if losing_trades else 0
+
+        # 7. Expectancy
+        expectancy = round(sum(t['PnL'] for t in self.trades) / num_trades, 2) if num_trades > 0 else 0
+
+        # 8. Largest win / lose
+        largest_win = round(max((t['PnL'] for t in self.trades), default=0), 2)
+        largest_loss = round(min((t['PnL'] for t in self.trades), default=0), 2)
+
+
+        return{
+            'Final_Balance': self.current_balance,
+            'Total_Return_pct': total_return_pct,
+            'Trade_Count': num_trades,
+            'Win_Rate': win_rate,
+            'Sharpe': sharpe,
+            'Max_Drawdown': max_drawdown_pct,
+            'Profit_Factor': profit_factor,
+            'Avg_Win': avg_win,
+            'Avg_Loss': avg_loss,
+            'Expectancy': expectancy,
+            'Largest_Win': largest_win,
+            'Largest_Loss': largest_loss,
+            'Trades': self.trades,
+            'Equity_Curve': self.equity_curve
+        }
+
+
+
+
         
     
 
