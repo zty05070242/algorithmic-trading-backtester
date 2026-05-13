@@ -262,9 +262,10 @@ if __name__ == "__main__":
     from strategy_folder.kalman_ma_hybrid import KalmanMAHybrid
     from strategy_folder.wavelet_kalman_cross import WaveletKalmanCrossover
     from strategy_folder.wavelet_ma_cross import WaveletMACrossover
+    from strategy_folder.two_b import TwoB
 
-    df = load_historical_data("^GSPC", "2000-01-01", "2026-04-15")
-    strategy = MovingAverageCrossover(fast_period=10, slow_period=20)
+    df = load_historical_data("SI=F", "2000-01-01", "2026-04-15")
+    strategy = TwoB(lookback=20, confirmation_days=3)
     backtester = Backtester(initial_balance=10000, risk_pct=0.02, slippage_pct=0.0001)
     results = backtester.run(df, strategy, verbose=True)
 

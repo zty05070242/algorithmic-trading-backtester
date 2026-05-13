@@ -1,14 +1,16 @@
 """
-run_comparison.py — main deliverable for the Kalman vs Wavelet experiment.
+run_comparison.py — 2B Rule vs Wavelet-2B across ten commodity futures, with
+both the plain and scaled backtesters for each strategy (four rows per ticker).
 
-For each ticker, runs four strategy variants through the basic Backtester and
-prints a per-ticker results table. Also saves:
-  - results/comparison_YYYYMMDD.csv — full table across every (ticker, strategy).
-  - results/equity_<ticker>.html    — equity curves overlaid for all 4 strategies.
+For each ticker, runs:
+  - 2B Rule          + Backtester
+  - 2B Rule          + BacktesterScaled
+  - Wavelet-2B       + Backtester
+  - Wavelet-2B       + BacktesterScaled
 
-Extra: an "honesty check" re-runs the wavelet strategies in global (look-ahead)
-mode and flags any case where the look-ahead version dramatically beats the
-causal rolling version — that would mean the wavelet was cheating.
+Saves:
+  - results/comparison_YYYYMMDD.csv — full table across every (ticker, run).
+  - results/equity_<ticker>.html    — equity curves overlaid for all 4 runs.
 
 Usage: python run_comparison.py
 """
@@ -23,17 +25,28 @@ import plotly.graph_objects as go
 
 from data_loader import load_historical_data
 from backtester import Backtester
+from backtester_scaled import BacktesterScaled
 
-from strategy_folder.ma_cross import MovingAverageCrossover
-from strategy_folder.kalman_ma_hybrid import KalmanMAHybrid
-from strategy_folder.wavelet_ma_cross import WaveletMACrossover
-from strategy_folder.wavelet_kalman_cross import WaveletKalmanCrossover
+from strategy_folder._strategy_base_class import Strategy
+from strategy_folder.two_b import TwoB
+from strategy_folder.wavelet_two_b import WaveletTwoB
 
 
 # --- Configuration ----------------------------------------------------------
 
-DEFAULT_TICKERS = ['^GSPC', 'SI=F']              # S&P 500 and silver futures
-START_DATE      = '2015-01-01'
+DEFAULT_TICKERS = [
+    'GC=F',   # Gold
+    'SI=F',   # Silver
+    'CL=F',   # Crude Oil (WTI)
+    'NG=F',   # Natural Gas
+    'HG=F',   # Copper
+    'ZW=F',   # Wheat
+    'ZC=F',   # Corn
+    'ZS=F',   # Soybeans
+    'KC=F',   # Coffee
+    'LE=F',   # Live Cattle
+]
+START_DATE      = '2000-01-01'
 END_DATE        = '2026-04-15'
 
 INITIAL_BALANCE = 10000.0
@@ -43,41 +56,66 @@ SLIPPAGE_PCT    = 0.0001
 RESULTS_DIR     = 'results'
 
 # Strategy params. Kept in one place so the README can reference them.
-MA_FAST, MA_SLOW     = 20, 50
-KMA_FAST_COV         = 0.01
-KMA_SLOW_PERIOD      = 50
-WK_FAST_COV          = 0.01      # matches KalmanMAHybrid's fast_cov
-WK_SLOW_COV          = 0.001     # matches KalmanCrossover __main__ default
+TWO_B_LOOKBACK       = 20
+TWO_B_CONFIRM        = 3
+W2B_DENOISE_WINDOW   = 128
+W2B_PROMINENCE_ATR   = 1.0
+W2B_PIVOT_CONFIRM    = 3
 
-# Short, stable labels — used as both the table row name and the equity plot legend.
-LBL_MA         = 'MA/MA'
-LBL_KMA        = 'Kalman/MA'
-LBL_WMA        = 'Wavelet+MA/MA'
-LBL_WKA        = 'Wavelet+Kalman'
+# Scaled backtester params.
+MAX_TRANCHES         = 3
 
+LBL_2B         = '2B Rule'
+LBL_W2B        = 'Wavelet-2B'
+SUFFIX_SCALED  = ' (scaled)'
 
-def _build_strategies(mode: str = 'rolling') -> List[Tuple[str, object]]:
-    """
-    Build the four strategy variants for one comparison pass.
-    `mode` only affects the two wavelet strategies; the non-wavelet ones are
-    constructed identically both times.
-    """
-    return [
-        (LBL_MA,  MovingAverageCrossover(fast_period=MA_FAST, slow_period=MA_SLOW)),
-        (LBL_KMA, KalmanMAHybrid(fast_cov=KMA_FAST_COV, slow_period=KMA_SLOW_PERIOD)),
-        (LBL_WMA, WaveletMACrossover(fast_period=MA_FAST, slow_period=MA_SLOW, mode=mode)),
-        (LBL_WKA, WaveletKalmanCrossover(fast_cov=WK_FAST_COV, slow_cov=WK_SLOW_COV, mode=mode)),
-    ]
-
-
-def _run_one(df: pd.DataFrame, strategy) -> dict:
-    """Run a single strategy on df and return the metrics dict from Backtester."""
-    bt = Backtester(
+# Backtester variants iterated for every strategy. Each entry pairs a label
+# suffix with a factory that returns a fresh backtester instance.
+BACKTESTER_VARIANTS = [
+    ('', lambda: Backtester(
         initial_balance=INITIAL_BALANCE,
         risk_pct=RISK_PCT,
         slippage_pct=SLIPPAGE_PCT,
-    )
-    return bt.run(df, strategy, verbose=False)
+    )),
+    (SUFFIX_SCALED, lambda: BacktesterScaled(
+        initial_balance=INITIAL_BALANCE,
+        risk_pct=RISK_PCT,
+        slippage_pct=SLIPPAGE_PCT,
+        max_tranches=MAX_TRANCHES,
+    )),
+]
+
+
+def _build_strategies() -> List[Tuple[str, object]]:
+    return [
+        (LBL_2B,  TwoB(lookback=TWO_B_LOOKBACK, confirmation_days=TWO_B_CONFIRM)),
+        (LBL_W2B, WaveletTwoB(
+            denoise_window=W2B_DENOISE_WINDOW,
+            min_prominence_atr=W2B_PROMINENCE_ATR,
+            pivot_confirm_bars=W2B_PIVOT_CONFIRM,
+            confirmation_days=TWO_B_CONFIRM,
+        )),
+    ]
+
+
+class _ReplayStrategy(Strategy):
+    """
+    Wraps a pre-computed signals DataFrame so generate_signals() is essentially
+    free. Used to avoid re-running the expensive Wavelet-2B pipeline once per
+    backtester variant — we generate signals once per (ticker, strategy) and
+    replay them through every backtester.
+    """
+    def __init__(self, name: str, signals_df: pd.DataFrame):
+        super().__init__(name=name)
+        self._cached = signals_df.copy()
+
+    def generate_signals(self) -> pd.DataFrame:
+        # set_data() (called by Backtester.run) overwrites self.data, so we
+        # restore the cached signals here. The backtester then iterates this
+        # DataFrame directly via the return value.
+        self.data = self._cached.copy()
+        self._signals_generated = True
+        return self.data
 
 
 def _metrics_row(ticker: str, label: str, metrics: dict) -> dict:
@@ -127,70 +165,65 @@ def run_comparison(tickers: List[str] = None,
     os.makedirs(RESULTS_DIR, exist_ok=True)
 
     rows = []
-    honesty_notes = []  # collect messages for the final "honesty check" summary
+    # Preserve insertion order so the equity-plot legend matches the run order.
+    full_labels = [
+        s_lbl + bt_suffix
+        for s_lbl, _ in _build_strategies()
+        for bt_suffix, _ in BACKTESTER_VARIANTS
+    ]
 
     for ticker in tickers:
         print(f"\n=== {ticker} ===")
         df = load_historical_data(ticker, start, end)
 
-        # --- Rolling (causal) pass: the headline numbers ---
-        rolling_results = {}           # label -> metrics dict (kept for equity plots)
-        for label, strat in _build_strategies(mode='rolling'):
-            print(f"  running: {label}")
-            metrics = _run_one(df, strat)
-            rolling_results[label] = metrics
-            rows.append(_metrics_row(ticker, label, metrics))
+        results = {}
+        for s_label, strat in _build_strategies():
+            # Generate signals ONCE per (ticker, strategy) — wavelet denoise
+            # is expensive, so we replay the same signal frame through every
+            # backtester variant via _ReplayStrategy.
+            print(f"  generating signals: {s_label}")
+            strat.set_data(df)
+            signals_df = strat.generate_signals()
 
-        # --- Equity plot from the rolling pass ---
-        equity_curves = [(lbl, rolling_results[lbl]['equity_curve'])
-                         for lbl in [LBL_MA, LBL_KMA, LBL_WMA, LBL_WKA]]
+            for bt_suffix, make_bt in BACKTESTER_VARIANTS:
+                full_label = s_label + bt_suffix
+                print(f"    running backtest: {full_label}")
+                replay = _ReplayStrategy(strat.name, signals_df)
+                metrics = make_bt().run(df, replay, verbose=False)
+                results[full_label] = metrics
+                rows.append(_metrics_row(ticker, full_label, metrics))
+
+        equity_curves = [(lbl, results[lbl]['equity_curve']) for lbl in full_labels]
         _plot_equity_curves(
             ticker,
             equity_curves,
             os.path.join(RESULTS_DIR, f"equity_{ticker.replace('^', '').replace('=', '_')}.html"),
         )
 
-        # --- Honesty check: global (look-ahead) vs rolling (causal) ---
-        # Re-run just the wavelet strategies in global mode and compare Sharpe.
-        # If global is dramatically better, the look-ahead was inflating results.
-        print(f"  honesty check (global vs rolling wavelet)...")
-        for label_rolling, strat_global in [
-            (LBL_WMA, WaveletMACrossover(fast_period=MA_FAST, slow_period=MA_SLOW, mode='global')),
-            (LBL_WKA, WaveletKalmanCrossover(fast_cov=WK_FAST_COV, slow_cov=WK_SLOW_COV, mode='global')),
-        ]:
-            global_metrics = _run_one(df, strat_global)
-            rolling_sharpe = rolling_results[label_rolling]['sharpe_ratio']
-            global_sharpe  = global_metrics['sharpe_ratio']
-            diff = global_sharpe - rolling_sharpe
-
-            # Threshold is arbitrary but reasonable: 0.5 on annualised Sharpe is
-            # a material gap. If global is +0.5 Sharpe above rolling, flag it.
-            verdict = "OK" if diff < 0.5 else "LOOK-AHEAD INFLATION"
-            honesty_notes.append(
-                f"{ticker:<6} {label_rolling:<16} rolling Sharpe={rolling_sharpe:>5.2f}  "
-                f"global Sharpe={global_sharpe:>5.2f}  diff={diff:+.2f}  [{verdict}]"
-            )
-
     results_df = pd.DataFrame(rows)
 
     # --- Print per-ticker tables ---
+    TICKER_NAMES = {
+        'GC=F': 'Gold',
+        'SI=F': 'Silver',
+        'CL=F': 'WTI Crude Oil',
+        'NG=F': 'Natural Gas',
+        'HG=F': 'Copper',
+        'ZW=F': 'Wheat',
+        'ZC=F': 'Corn',
+        'ZS=F': 'Soybeans',
+        'KC=F': 'Coffee',
+        'LE=F': 'Live Cattle',
+    }
+
     print("\n" + "=" * 72)
-    print("RESULTS (rolling, causal mode)")
+    print("RESULTS — 2B Rule vs Wavelet-2B (plain + scaled backtester)")
     print("=" * 72)
     for ticker in tickers:
+        name = TICKER_NAMES.get(ticker, ticker)
         sub = results_df[results_df['ticker'] == ticker].drop(columns='ticker')
-        print(f"\n{ticker}:")
+        print(f"\n{ticker} ({name}):")
         print(sub.to_string(index=False))
-
-    # --- Print honesty-check block ---
-    print("\n" + "=" * 72)
-    print("HONESTY CHECK — did wavelet look-ahead inflate results?")
-    print("=" * 72)
-    print("If 'global' Sharpe is much higher than 'rolling' Sharpe, the offline")
-    print("wavelet was cheating with future data. Rolling is the realistic number.")
-    print()
-    for note in honesty_notes:
-        print("  " + note)
 
     # --- Save CSV ---
     stamp = date.today().strftime('%Y%m%d')

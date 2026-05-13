@@ -4,7 +4,12 @@ import pandas as pd
 
 # Standard OHLCV + signal columns that every strategy produces.
 # Anything else in the DataFrame is treated as an overlay indicator.
-_BASE_COLS = {'open', 'high', 'low', 'close', 'volume', 'signal'}
+# Helper columns that are NOT on the price scale are excluded here so
+# they don't get auto-plotted on the price axis and wreck the chart.
+_BASE_COLS = {
+    'open', 'high', 'low', 'close', 'volume', 'signal',
+    'avg_volume', 'atr', 'stop_loss',
+}
 
 
 def plot_signals(strategy, save_path: str = 'signals_chart.html', show: bool = True):
