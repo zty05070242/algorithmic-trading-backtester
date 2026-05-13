@@ -198,14 +198,17 @@ class BacktesterScaled:
 
         # === Force-close all open tranches at end of data ===
         final_price = df.iloc[-1]['close']
+        had_open_tranches = bool(self.long_tranches or self.short_tranches)
         for t in self.long_tranches:
             pnl = (final_price - t['entry_price']) * t['size']
             self.current_balance += pnl
         for t in self.short_tranches:
             pnl = (t['entry_price'] - final_price) * t['size']
             self.current_balance += pnl
-        if verbose and (self.long_tranches or self.short_tranches):
-            print(f"\nForce-closed {len(self.long_tranches)} long + {len(self.short_tranches)} short tranches at end of data")
+        if had_open_tranches:
+            self.equity_curve.append({'date': df.index[-1], 'balance': self.current_balance})
+            if verbose:
+                print(f"\nForce-closed {len(self.long_tranches)} long + {len(self.short_tranches)} short tranches at end of data")
         self.long_tranches.clear()
         self.short_tranches.clear()
 
